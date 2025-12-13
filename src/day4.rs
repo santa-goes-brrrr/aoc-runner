@@ -14,7 +14,7 @@ fn get_acceseable(rolls: &[Vec<bool>]) -> Vec<(usize, usize)> {
     let height = rolls.len();
     let width = rolls[0].len();
 
-    let mut acceseables = vec![];
+    let mut acceseables = Vec::with_capacity(height*width);
     let around: [(i16, i16); 8] = [
         (-1, 0),
         (-1, -1),
