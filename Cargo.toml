@@ -1,16 +1,26 @@
-[package]
-name = "advent-of-code-2025"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+resolver = "2"
+members = [
+    "solutions/aoc-2025-01-1", "solutions/aoc-2025-01-2",
+    "solutions/aoc-2025-02-1", "solutions/aoc-2025-02-2",
+    "solutions/aoc-2025-03-1", "solutions/aoc-2025-03-2",
+    "solutions/aoc-2025-04-1", "solutions/aoc-2025-04-2",
+    "solutions/aoc-2025-05-1", "solutions/aoc-2025-05-2",
+    "solutions/aoc-2025-06-1", "solutions/aoc-2025-06-2",
+    "solutions/aoc-2025-07-1", "solutions/aoc-2025-07-2",
+    "solutions/aoc-2025-08-1", "solutions/aoc-2025-08-2",
+    "solutions/aoc-2025-09-1", "solutions/aoc-2025-09-2",
+    "solutions/aoc-2025-10-1", "solutions/aoc-2025-10-2",
+    "solutions/aoc-2025-11-1", "solutions/aoc-2025-11-2",
+    "solutions/aoc-2025-12-1",
+]
 
-[dependencies]
+[workspace.dependencies]
 ahash = "0.8.12"
-aoc-runner = "0.3.0"
-aoc-runner-derive = "0.3.0"
-foldhash = "0.2.0"
-nohash = "0.2.0"
-tinyset = "0.5.2"
+pathfinding = "4.14.0"
+petgraph = { version = "0.8.3", features = ["rayon"] }
+z3 = "0.19.5"
 
 [profile.release]
 opt-level = 3
-lto = true 
+lto = true

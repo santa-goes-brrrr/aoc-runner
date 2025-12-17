@@ -1,0 +1,12 @@
+[package]
+name = "aoc-2025-11-1"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "aoc-2025-11-1"
+path = "src/main.rs"
+
+[dependencies]
+ahash = { workspace = true }
+petgraph = { workspace = true }
