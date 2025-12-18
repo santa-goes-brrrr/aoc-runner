@@ -1,4 +1,5 @@
 target*
 .DS_Store
+inputs/
 input.txt
 output.txt
