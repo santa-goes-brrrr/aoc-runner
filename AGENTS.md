@@ -1,6 +1,6 @@
 # AGENTS.md
 
-ALWAYS KEEP THIS FILE UPDATED
+ALWAYS KEEP THIS FILE AND README.md UPDATED
 
 ## Project Overview
 
@@ -12,7 +12,9 @@ Advent of Code solutions repository optimized for performance. Solutions are wri
 advent-of-performance/
 ├── aoc.db                    # libSQL database with all inputs and solutions
 ├── cli/                      # CLI tool for managing the database and running solutions
+├── docs/                     # Documentation assets (demo.gif, demo.cast)
 ├── inputs/                   # Backup of input/output files
+├── README.md                 # Project readme
 └── solutions/
     └── year=YYYY/
         └── day=DD/
@@ -56,39 +58,60 @@ cargo build -p cli
 The CLI uses libSQL for database access and rayon for parallel benchmarking.
 
 ```bash
-# Initialize the database (create tables)
-cargo run -p cli -- init
-
-# Reset the database (delete all data)
-cargo run -p cli -- reset
-
-# List all solutions
-cargo run -p cli -- list
-
 # Run a solution and verify against expected output (10 benchmark runs by default)
-cargo run -p cli -- run -y 2025 -d 1 -p 1
+cargo run -p cli -- run one -y 2025 -d 1 -p 1
 
 # Run with custom number of benchmark iterations
-cargo run -p cli -- run -y 2025 -d 1 -p 1 -r 20
+cargo run -p cli -- run one -y 2025 -d 1 -p 1 -r 20
 
 # Run all solutions
-cargo run -p cli -- run-all
+cargo run -p cli -- run all
 
 # Run all with custom iterations
-cargo run -p cli -- run-all -r 5
+cargo run -p cli -- run all -r 5
+
+# Compare performance between current branch and main
+cargo run -p cli -- compare
+
+# Compare with custom iterations
+cargo run -p cli -- compare -r 20
+```
+
+#### Compare Command
+
+The `compare` command benchmarks all solutions on the current branch, then switches to `main`, benchmarks again, and prints a side-by-side comparison report. If already on `main`, it outputs "Nothing to compare".
+
+The report shows:
+- Per-solution timing on both branches
+- Absolute and percentage difference
+- Summary of improvements (▼) and regressions (▲)
+
+#### Database Commands
+
+All database operations are under the `db` subcommand:
+
+```bash
+# Initialize the database (create tables)
+cargo run -p cli -- db init
+
+# Reset the database (delete all data)
+cargo run -p cli -- db reset
+
+# List all solutions
+cargo run -p cli -- db list
 
 # Get input for a puzzle
-cargo run -p cli -- read-input -y 2025 -d 1 -p 1
+cargo run -p cli -- db read input -y 2025 -d 1 -p 1
 
 # Get expected solution
-cargo run -p cli -- read-solution -y 2025 -d 1 -p 1
+cargo run -p cli -- db read solution -y 2025 -d 1 -p 1
 
 # Update a solution (input piped from stdin)
-cargo run -p cli -- read-input -y 2025 -d 1 -p 1 | \
-  cargo run -p cli -- upsert -y 2025 -d 1 -p 1 -s "answer"
+cargo run -p cli -- db read input -y 2025 -d 1 -p 1 | \
+  cargo run -p cli -- db upsert -y 2025 -d 1 -p 1 -s "answer"
 
 # Delete an entry
-cargo run -p cli -- delete -y 2025 -d 1 -p 1
+cargo run -p cli -- db delete -y 2025 -d 1 -p 1
 ```
 
 Short args: `-y` (year), `-d` (day), `-p` (part), `-s` (solution), `-r` (runs)
@@ -106,10 +129,10 @@ Each solution should produce output matching the expected solution in the databa
 
 ```bash
 # Run and verify a single solution
-cargo run -p cli -- run -y 2025 -d 1 -p 1
+cargo run -p cli -- run one -y 2025 -d 1 -p 1
 
 # Run and verify all solutions
-cargo run -p cli -- run-all
+cargo run -p cli -- run all
 ```
 
 Output uses colored indicators:

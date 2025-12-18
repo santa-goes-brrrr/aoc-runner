@@ -17,48 +17,28 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Insert or update a solution (input read from stdin)
-    Upsert {
-        #[arg(short, long)]
-        year: u16,
-        #[arg(short, long)]
-        day: u8,
-        #[arg(short, long)]
-        part: u8,
-        #[arg(short, long)]
-        solution: String,
+    /// Database operations (init, reset, list, upsert, delete, read)
+    Db {
+        #[command(subcommand)]
+        command: DbCommands,
     },
-    /// Read the solution/output for a given year, day, part
-    ReadSolution {
-        #[arg(short, long)]
-        year: u16,
-        #[arg(short, long)]
-        day: u8,
-        #[arg(short, long)]
-        part: u8,
-    },
-    /// Read the input for a given year, day, part
-    ReadInput {
-        #[arg(short, long)]
-        year: u16,
-        #[arg(short, long)]
-        day: u8,
-        #[arg(short, long)]
-        part: u8,
-    },
-    /// Delete a solution
-    Delete {
-        #[arg(short, long)]
-        year: u16,
-        #[arg(short, long)]
-        day: u8,
-        #[arg(short, long)]
-        part: u8,
-    },
-    /// List all solutions
-    List,
-    /// Run a solution and verify against expected output
+    /// Run and verify solutions
     Run {
+        #[command(subcommand)]
+        command: RunCommands,
+    },
+    /// Compare performance between current branch and main
+    Compare {
+        /// Number of runs for timing (default: 10)
+        #[arg(short, long, default_value_t = 10)]
+        runs: u32,
+    },
+}
+
+#[derive(Subcommand)]
+enum RunCommands {
+    /// Run a single solution and verify against expected output
+    One {
         #[arg(short, long)]
         year: u16,
         #[arg(short, long)]
@@ -70,15 +50,68 @@ enum Commands {
         runs: u32,
     },
     /// Run all solutions and verify against expected outputs
-    RunAll {
+    All {
         /// Number of runs for timing (default: 10)
         #[arg(short, long, default_value_t = 10)]
         runs: u32,
     },
+}
+
+#[derive(Subcommand)]
+enum DbCommands {
     /// Initialize the database (create tables)
     Init,
     /// Reset the database (delete all data)
     Reset,
+    /// List all solutions
+    List,
+    /// Insert or update a solution (input read from stdin)
+    Upsert {
+        #[arg(short, long)]
+        year: u16,
+        #[arg(short, long)]
+        day: u8,
+        #[arg(short, long)]
+        part: u8,
+        #[arg(short, long)]
+        solution: String,
+    },
+    /// Delete a solution
+    Delete {
+        #[arg(short, long)]
+        year: u16,
+        #[arg(short, long)]
+        day: u8,
+        #[arg(short, long)]
+        part: u8,
+    },
+    /// Read data from the database
+    Read {
+        #[command(subcommand)]
+        command: ReadCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum ReadCommands {
+    /// Read the solution/output for a given year, day, part
+    Solution {
+        #[arg(short, long)]
+        year: u16,
+        #[arg(short, long)]
+        day: u8,
+        #[arg(short, long)]
+        part: u8,
+    },
+    /// Read the input for a given year, day, part
+    Input {
+        #[arg(short, long)]
+        year: u16,
+        #[arg(short, long)]
+        day: u8,
+        #[arg(short, long)]
+        part: u8,
+    },
 }
 
 #[tokio::main]
@@ -89,59 +122,68 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let conn = db.connect()?;
 
     match cli.command {
-        Commands::Upsert {
-            year,
-            day,
-            part,
-            solution,
-        } => {
-            let mut input = String::new();
-            io::stdin().read_to_string(&mut input)?;
-            upsert_solution(&conn, year, day, part, &input, &solution).await?;
-            println!("Upserted: year={year}, day={day}, part={part}, solution={solution}");
-        }
-        Commands::ReadSolution { year, day, part } => {
-            let solution = read_solution(&conn, year, day, part).await?;
-            print!("{solution}");
-        }
-        Commands::ReadInput { year, day, part } => {
-            let input = read_input(&conn, year, day, part).await?;
-            print!("{input}");
-        }
-        Commands::Delete { year, day, part } => {
-            delete_solution(&conn, year, day, part).await?;
-            println!("Deleted: year={year}, day={day}, part={part}");
-        }
-        Commands::List => {
-            list_solutions(&conn).await?;
-        }
-        Commands::Run { year, day, part, runs } => {
-            let result = run_solution(&conn, year, day, part, runs).await?;
-            print_run_result(&result);
-            if !result.passed {
-                std::process::exit(1);
+        Commands::Db { command } => match command {
+            DbCommands::Init => {
+                create_schema(&conn).await?;
+                println!("Database initialized");
             }
-        }
-        Commands::RunAll { runs } => {
-            let summary = run_all_solutions(&conn, runs).await?;
-            println!(
-                "\n{GREEN}✓ {} passed{RESET}, {RED}✗ {} errors{RESET}, {YELLOW}⧖ {} timeouts{RESET} ({:.2}ms)",
-                summary.passed,
-                summary.errors,
-                summary.timeouts,
-                summary.total_time_ms as f64
-            );
-            if summary.errors > 0 || summary.timeouts > 0 {
-                std::process::exit(1);
+            DbCommands::Reset => {
+                reset_db(&conn).await?;
+                println!("Database reset");
             }
-        }
-        Commands::Init => {
-            create_schema(&conn).await?;
-            println!("Database initialized");
-        }
-        Commands::Reset => {
-            reset_db(&conn).await?;
-            println!("Database reset");
+            DbCommands::List => {
+                list_solutions(&conn).await?;
+            }
+            DbCommands::Upsert {
+                year,
+                day,
+                part,
+                solution,
+            } => {
+                let mut input = String::new();
+                io::stdin().read_to_string(&mut input)?;
+                upsert_solution(&conn, year, day, part, &input, &solution).await?;
+                println!("Upserted: year={year}, day={day}, part={part}, solution={solution}");
+            }
+            DbCommands::Delete { year, day, part } => {
+                delete_solution(&conn, year, day, part).await?;
+                println!("Deleted: year={year}, day={day}, part={part}");
+            }
+            DbCommands::Read { command } => match command {
+                ReadCommands::Solution { year, day, part } => {
+                    let solution = read_solution(&conn, year, day, part).await?;
+                    print!("{solution}");
+                }
+                ReadCommands::Input { year, day, part } => {
+                    let input = read_input(&conn, year, day, part).await?;
+                    print!("{input}");
+                }
+            },
+        },
+        Commands::Run { command } => match command {
+            RunCommands::One { year, day, part, runs } => {
+                let result = run_solution(&conn, year, day, part, runs).await?;
+                print_run_result(&result);
+                if !result.passed {
+                    std::process::exit(1);
+                }
+            }
+            RunCommands::All { runs } => {
+                let summary = run_all_solutions(&conn, runs).await?;
+                println!(
+                    "\n{GREEN}✓ {} passed{RESET}, {RED}✗ {} errors{RESET}, {YELLOW}⧖ {} timeouts{RESET} ({:.2}ms)",
+                    summary.passed,
+                    summary.errors,
+                    summary.timeouts,
+                    summary.total_time_ms as f64
+                );
+                if summary.errors > 0 || summary.timeouts > 0 {
+                    std::process::exit(1);
+                }
+            }
+        },
+        Commands::Compare { runs } => {
+            compare_branches(&conn, runs).await?;
         }
     }
 
@@ -556,4 +598,205 @@ async fn run_all_solutions(conn: &Connection, runs: u32) -> Result<RunSummary, B
     }
 
     Ok(summary)
+}
+
+fn get_current_branch() -> Result<String, Box<dyn std::error::Error>> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()?;
+    if !output.status.success() {
+        return Err("Failed to get current branch".into());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn checkout_branch(branch: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let output = Command::new("git")
+        .args(["checkout", branch])
+        .output()?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Failed to checkout {branch}: {stderr}").into());
+    }
+    Ok(())
+}
+
+#[derive(Clone)]
+struct BenchmarkResult {
+    year: u16,
+    day: u8,
+    part: u8,
+    mean_ms: Option<f64>,
+    error: Option<String>,
+}
+
+async fn collect_benchmark_results(
+    conn: &Connection,
+    runs: u32,
+    branch_name: &str,
+) -> Result<Vec<BenchmarkResult>, Box<dyn std::error::Error>> {
+    let mut rows = conn
+        .query(
+            "SELECT year, day, part FROM solutions ORDER BY year, day, part",
+            (),
+        )
+        .await?;
+
+    let mut entries = Vec::new();
+    while let Some(row) = rows.next().await? {
+        let year: u16 = row.get::<u32>(0)? as u16;
+        let day: u8 = row.get::<u32>(1)? as u8;
+        let part: u8 = row.get::<u32>(2)? as u8;
+        entries.push((year, day, part));
+    }
+
+    println!("\n{YELLOW}Running benchmarks on '{branch_name}'...{RESET}\n");
+
+    let mut results = Vec::new();
+    for (year, day, part) in entries {
+        let result = run_solution(conn, year, day, part, runs).await?;
+        print_run_result(&result);
+
+        results.push(BenchmarkResult {
+            year,
+            day,
+            part,
+            mean_ms: result.timing.map(|t| t.mean_ms),
+            error: result.error,
+        });
+    }
+
+    Ok(results)
+}
+
+fn print_comparison_report(
+    current_branch: &str,
+    current_results: &[BenchmarkResult],
+    main_results: &[BenchmarkResult],
+) {
+    println!("\n{YELLOW}═══════════════════════════════════════════════════════════════{RESET}");
+    println!("{YELLOW}  Performance Comparison: {current_branch} vs main{RESET}");
+    println!("{YELLOW}═══════════════════════════════════════════════════════════════{RESET}\n");
+
+    println!(
+        "{:<12} {:>12} {:>12} {:>12} {:>10}",
+        "Solution", "Branch", "Main", "Diff", "Change"
+    );
+    println!("{}", "─".repeat(60));
+
+    let mut total_current = 0.0;
+    let mut total_main = 0.0;
+    let mut improvements = 0;
+    let mut regressions = 0;
+
+    for (current, main) in current_results.iter().zip(main_results.iter()) {
+        let label = format!("{}-{:02}-{}", current.year, current.day, current.part);
+
+        match (current.mean_ms, main.mean_ms) {
+            (Some(curr_ms), Some(main_ms)) => {
+                total_current += curr_ms;
+                total_main += main_ms;
+
+                let diff = curr_ms - main_ms;
+                let pct = if main_ms > 0.0 {
+                    ((curr_ms - main_ms) / main_ms) * 100.0
+                } else {
+                    0.0
+                };
+
+                let (color, symbol) = if diff < -0.1 {
+                    improvements += 1;
+                    (GREEN, "▼")
+                } else if diff > 0.1 {
+                    regressions += 1;
+                    (RED, "▲")
+                } else {
+                    (RESET, "≈")
+                };
+
+                println!(
+                    "{:<12} {:>10.2}ms {:>10.2}ms {:>10.2}ms {color}{:>+9.1}% {symbol}{RESET}",
+                    label, curr_ms, main_ms, diff, pct
+                );
+            }
+            (Some(curr_ms), None) => {
+                total_current += curr_ms;
+                println!(
+                    "{:<12} {:>10.2}ms {:>12} {:>12} {:>10}",
+                    label, curr_ms, "N/A", "-", "new"
+                );
+            }
+            (None, Some(main_ms)) => {
+                total_main += main_ms;
+                let error_str = current.error.as_deref().unwrap_or("error");
+                println!(
+                    "{RED}{:<12} {:>12} {:>10.2}ms {:>12} {:>10}{RESET}",
+                    label, error_str, main_ms, "-", "-"
+                );
+            }
+            (None, None) => {
+                let curr_err = current.error.as_deref().unwrap_or("error");
+                let main_err = main.error.as_deref().unwrap_or("error");
+                println!(
+                    "{RED}{:<12} {:>12} {:>12} {:>12} {:>10}{RESET}",
+                    label, curr_err, main_err, "-", "-"
+                );
+            }
+        }
+    }
+
+    println!("{}", "─".repeat(60));
+
+    let total_diff = total_current - total_main;
+    let total_pct = if total_main > 0.0 {
+        ((total_current - total_main) / total_main) * 100.0
+    } else {
+        0.0
+    };
+
+    let (total_color, total_symbol) = if total_diff < -0.1 {
+        (GREEN, "▼")
+    } else if total_diff > 0.1 {
+        (RED, "▲")
+    } else {
+        (RESET, "≈")
+    };
+
+    println!(
+        "{:<12} {:>10.2}ms {:>10.2}ms {:>10.2}ms {total_color}{:>+9.1}% {total_symbol}{RESET}",
+        "Total", total_current, total_main, total_diff, total_pct
+    );
+
+    println!("\n{GREEN}▼ {improvements} faster{RESET}, {RED}▲ {regressions} slower{RESET}");
+}
+
+async fn compare_branches(conn: &Connection, runs: u32) -> Result<(), Box<dyn std::error::Error>> {
+    let current_branch = get_current_branch()?;
+
+    if current_branch == "main" {
+        println!("Nothing to compare - already on main branch");
+        return Ok(());
+    }
+
+    // Run benchmarks on current branch
+    let current_results = collect_benchmark_results(conn, runs, &current_branch).await?;
+
+    // Clean build artifacts to ensure fair comparison
+    println!("\n{YELLOW}Cleaning build artifacts...{RESET}");
+    let _ = Command::new("cargo").args(["clean", "--release"]).output();
+
+    // Switch to main and run benchmarks
+    println!("\n{YELLOW}Switching to main branch...{RESET}");
+    checkout_branch("main")?;
+
+    let main_results = collect_benchmark_results(conn, runs, "main").await?;
+
+    // Switch back to original branch
+    println!("\n{YELLOW}Switching back to '{current_branch}'...{RESET}");
+    checkout_branch(&current_branch)?;
+
+    // Print comparison report
+    print_comparison_report(&current_branch, &current_results, &main_results);
+
+    Ok(())
 }

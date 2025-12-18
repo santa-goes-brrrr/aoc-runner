@@ -8,5 +8,8 @@ Advent of Code solutions optimized for performance, written in Rust.
 
 ```bash
 # Run all solutions
-cargo run -p cli -- run-all
+cargo run -p cli -- run all
+
+# Compare performance against main branch
+cargo run -p cli -- compare
 ```
