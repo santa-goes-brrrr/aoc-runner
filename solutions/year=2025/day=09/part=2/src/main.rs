@@ -30,7 +30,7 @@ pub fn solve_p2(s: &str) -> u64 {
         }
     }
 
-    rectangles.sort_by_key(|(_, _, a)| *a);
+    // rectangles.sort_by_key(|(_, _, a)| *a);
 
     let n = points.len();
     points.push(*points.first().unwrap());
