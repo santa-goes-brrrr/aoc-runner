@@ -45,7 +45,7 @@ fn is_invalid_s(n: u64, s: u64, num_digits: u64) -> bool {
     true
 }
 
-fn solve_p2(input: &str) -> u64 {
+pub fn solve_p2(input: &str) -> u64 {
     let mut total: u64 = 0;
     let mut cache: HashMap<u64, bool> = HashMap::new();
 

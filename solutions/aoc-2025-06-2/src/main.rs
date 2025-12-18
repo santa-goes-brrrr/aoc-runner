@@ -8,7 +8,7 @@ fn main() {
     println!("{}", solve_p2::<4>(&s));
 }
 
-fn solve_p2<const N: usize>(s: &str) -> u128 {
+pub fn solve_p2<const N: usize>(s: &str) -> u128 {
     let ops = s
         .lines()
         .last()

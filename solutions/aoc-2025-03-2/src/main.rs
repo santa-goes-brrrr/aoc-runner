@@ -7,7 +7,7 @@ fn main() {
     println!("{}", solve_p2(&s));
 }
 
-fn solve_p2(s: &str) -> u64 {
+pub fn solve_p2(s: &str) -> u64 {
     let mut result: u64 = 0;
 
     for line in s.lines() {

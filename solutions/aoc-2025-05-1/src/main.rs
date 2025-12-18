@@ -10,7 +10,7 @@ fn main() {
     println!("{}", solve_p1(&s));
 }
 
-fn solve_p1(s: &str) -> usize {
+pub fn solve_p1(s: &str) -> usize {
     let (ranges, ids) = s.split_once("\n\n").unwrap();
 
     let ids: Vec<u64> = ids.lines().map(|s| s.parse().unwrap()).collect();

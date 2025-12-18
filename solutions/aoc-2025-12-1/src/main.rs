@@ -9,7 +9,7 @@ fn main() {
 
 type Shape = [[bool; 3]; 3];
 
-fn solve_p1(s: &str) -> usize {
+pub fn solve_p1(s: &str) -> usize {
     let mut solvable = 0;
 
     let mut blocks = s.split("\n\n");

@@ -9,7 +9,7 @@ fn main() {
     println!("{}", solve_p2(&s));
 }
 
-fn solve_p2(s: &str) -> usize {
+pub fn solve_p2(s: &str) -> usize {
     let mut adj = HashMap::new();
 
     for line in s.lines() {

@@ -23,7 +23,7 @@ fn num_neighbors(p: &(usize, usize), grid: &HashSet<(usize, usize)>) -> usize {
     n
 }
 
-fn solve_p2(s: &str) -> usize {
+pub fn solve_p2(s: &str) -> usize {
     let mut grid = HashSet::new();
 
     for (y, l) in s.lines().enumerate() {

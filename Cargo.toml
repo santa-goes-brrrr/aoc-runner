@@ -1,19 +1,6 @@
 [workspace]
 resolver = "2"
-members = [
-    "solutions/aoc-2025-01-1", "solutions/aoc-2025-01-2",
-    "solutions/aoc-2025-02-1", "solutions/aoc-2025-02-2",
-    "solutions/aoc-2025-03-1", "solutions/aoc-2025-03-2",
-    "solutions/aoc-2025-04-1", "solutions/aoc-2025-04-2",
-    "solutions/aoc-2025-05-1", "solutions/aoc-2025-05-2",
-    "solutions/aoc-2025-06-1", "solutions/aoc-2025-06-2",
-    "solutions/aoc-2025-07-1", "solutions/aoc-2025-07-2",
-    "solutions/aoc-2025-08-1", "solutions/aoc-2025-08-2",
-    "solutions/aoc-2025-09-1", "solutions/aoc-2025-09-2",
-    "solutions/aoc-2025-10-1", "solutions/aoc-2025-10-2",
-    "solutions/aoc-2025-11-1", "solutions/aoc-2025-11-2",
-    "solutions/aoc-2025-12-1",
-]
+members = ["solutions/*"]
 
 [workspace.dependencies]
 ahash = "0.8.12"

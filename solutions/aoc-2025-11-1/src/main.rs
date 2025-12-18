@@ -9,7 +9,7 @@ fn main() {
     println!("{}", solve_p1(&s));
 }
 
-fn solve_p1(s: &str) -> usize {
+pub fn solve_p1(s: &str) -> usize {
     let mut graph = DiGraph::<&str, i32>::new();
 
     let mut names = HashMap::new();

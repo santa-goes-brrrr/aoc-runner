@@ -31,7 +31,7 @@ fn distance(rhs: &Coords, lhs: &Coords) -> i64 {
     (rhs.0 - lhs.0).pow(2) + (rhs.1 - lhs.1).pow(2) + (rhs.2 - lhs.2).pow(2)
 }
 
-fn solve_p2(s: &str) -> usize {
+pub fn solve_p2(s: &str) -> usize {
     let mut points: Vec<Coords> = vec![];
 
     for line in s.lines() {

@@ -7,7 +7,7 @@ fn main() {
     println!("{}", solve_p1(&s));
 }
 
-fn solve_p1(s: &str) -> usize {
+pub fn solve_p1(s: &str) -> usize {
     let width = s.chars().position(|c| c == '\n').unwrap();
     let height = s.chars().filter(|&c| c == '\n').count() - 1;
 

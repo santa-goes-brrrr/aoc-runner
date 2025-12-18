@@ -9,7 +9,7 @@ fn main() {
     println!("{}", solve_p2(&s));
 }
 
-fn solve_p2(s: &str) -> u64 {
+pub fn solve_p2(s: &str) -> u64 {
     let (ranges, _) = s.split_once("\n\n").unwrap();
 
     let mut ranges: Vec<Range> = ranges

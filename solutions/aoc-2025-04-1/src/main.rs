@@ -8,7 +8,7 @@ fn main() {
     println!("{}", solve_p1(&s));
 }
 
-fn solve_p1(s: &str) -> usize {
+pub fn solve_p1(s: &str) -> usize {
     let mut grid = HashSet::new();
 
     for (y, l) in s.lines().enumerate() {

@@ -8,7 +8,7 @@ fn main() {
     println!("{}", solve_p1(&s));
 }
 
-fn solve_p1(s: &str) -> usize {
+pub fn solve_p1(s: &str) -> usize {
     let mut res = 0;
 
     for line in s.lines() {

@@ -7,7 +7,7 @@ fn main() {
     println!("{}", solve_p1(&s));
 }
 
-fn solve_p1(s: &str) -> u32 {
+pub fn solve_p1(s: &str) -> u32 {
     let mut num_zeros: u32 = 0;
     let mut current: i32 = 50;
 
