@@ -3,3 +3,4 @@ target*
 inputs/
 input.txt
 output.txt
+benches/bench.rs
