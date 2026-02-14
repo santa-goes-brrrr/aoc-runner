@@ -6,16 +6,22 @@ Advent of Code solutions optimized for performance, written in Rust.
   <img src="docs/santa-goes-brrrr.png" alt="Santa Goes Brrrr" width="50%">
 </p>
 
-![Demo](docs/demo.gif)
-
 ## Quick Start
 
-```bash
-# Run all solutions
-cargo run -p cli -- run all
+### Verify
 
-# Compare performance against main branch
-cargo run -p cli -- compare
+```bash
+cargo test --test verify
 ```
 
-![Performance Comparison](docs/comparison.png)
+### Bench
+
+```bash
+cargo bench 
+```
+
+or
+
+```bash
+cargo bench -- y2025_d05_p1
+```
