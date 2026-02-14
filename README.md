@@ -3,7 +3,7 @@
 Advent of Code solutions optimized for performance, written in Rust.
 
 <p align="center">
-  <img src="docs/santa-goes-brrrr.png" alt="Santa Goes Brrrr" width="50%">
+  <img src="santa-goes-brrrr.png" alt="Santa Goes Brrrr" width="50%">
 </p>
 
 ## Quick Start
@@ -12,6 +12,11 @@ Advent of Code solutions optimized for performance, written in Rust.
 
 ```bash
 cargo test --test verify
+```
+or
+
+```bash
+cargo test --test verify y2025_d05_p1
 ```
 
 ### Bench
