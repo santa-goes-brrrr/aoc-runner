@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use libsql::{Builder, Connection};
 use rayon::prelude::*;
+use std::fs;
 use std::io::{self, Read, Write};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -65,16 +66,10 @@ enum DbCommands {
     Reset,
     /// List all solutions
     List,
-    /// Insert or update a solution (input read from stdin)
+    /// Insert or update data
     Upsert {
-        #[arg(short, long)]
-        year: u16,
-        #[arg(short, long)]
-        day: u8,
-        #[arg(short, long)]
-        part: u8,
-        #[arg(short, long)]
-        solution: String,
+        #[command(subcommand)]
+        command: UpsertCommands,
     },
     /// Delete a solution
     Delete {
@@ -89,6 +84,40 @@ enum DbCommands {
     Read {
         #[command(subcommand)]
         command: ReadCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum UpsertCommands {
+    /// Upsert the input for a given year, day, part (reads from stdin by default)
+    Input {
+        #[arg(short, long)]
+        year: u16,
+        #[arg(short, long)]
+        day: u8,
+        #[arg(short, long)]
+        part: u8,
+        /// Value as a string
+        #[arg(long, conflicts_with = "file")]
+        value: Option<String>,
+        /// Read value from a file
+        #[arg(short, long, conflicts_with = "value")]
+        file: Option<String>,
+    },
+    /// Upsert the expected output for a given year, day, part (reads from stdin by default)
+    Output {
+        #[arg(short, long)]
+        year: u16,
+        #[arg(short, long)]
+        day: u8,
+        #[arg(short, long)]
+        part: u8,
+        /// Value as a string
+        #[arg(long, conflicts_with = "file")]
+        value: Option<String>,
+        /// Read value from a file
+        #[arg(short, long, conflicts_with = "value")]
+        file: Option<String>,
     },
 }
 
@@ -134,17 +163,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             DbCommands::List => {
                 list_solutions(&conn).await?;
             }
-            DbCommands::Upsert {
-                year,
-                day,
-                part,
-                solution,
-            } => {
-                let mut input = String::new();
-                io::stdin().read_to_string(&mut input)?;
-                upsert_solution(&conn, year, day, part, &input, &solution).await?;
-                println!("Upserted: year={year}, day={day}, part={part}, solution={solution}");
-            }
+            DbCommands::Upsert { command } => match command {
+                UpsertCommands::Input { year, day, part, value, file } => {
+                    let data = read_upsert_value(value, file)?;
+                    upsert_input(&conn, year, day, part, &data).await?;
+                    println!("Upserted input: year={year}, day={day}, part={part}");
+                }
+                UpsertCommands::Output { year, day, part, value, file } => {
+                    let data = read_upsert_value(value, file)?;
+                    upsert_output(&conn, year, day, part, &data).await?;
+                    println!("Upserted output: year={year}, day={day}, part={part}");
+                }
+            },
             DbCommands::Delete { year, day, part } => {
                 delete_solution(&conn, year, day, part).await?;
                 println!("Deleted: year={year}, day={day}, part={part}");
@@ -211,17 +241,46 @@ async fn reset_db(conn: &Connection) -> Result<(), libsql::Error> {
     Ok(())
 }
 
-async fn upsert_solution(
+fn read_upsert_value(value: Option<String>, file: Option<String>) -> Result<String, Box<dyn std::error::Error>> {
+    match (value, file) {
+        (Some(v), None) => Ok(v),
+        (None, Some(path)) => Ok(fs::read_to_string(&path)?),
+        (None, None) => {
+            let mut buf = String::new();
+            io::stdin().read_to_string(&mut buf)?;
+            Ok(buf)
+        }
+        (Some(_), Some(_)) => unreachable!("clap prevents --value and --file together"),
+    }
+}
+
+async fn upsert_input(
     conn: &Connection,
     year: u16,
     day: u8,
     part: u8,
     input: &str,
+) -> Result<(), libsql::Error> {
+    conn.execute(
+        "INSERT INTO solutions (year, day, part, input, output) VALUES (?, ?, ?, ?, '')
+         ON CONFLICT(year, day, part) DO UPDATE SET input = excluded.input",
+        (year, day, part, input),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn upsert_output(
+    conn: &Connection,
+    year: u16,
+    day: u8,
+    part: u8,
     output: &str,
 ) -> Result<(), libsql::Error> {
     conn.execute(
-        "INSERT OR REPLACE INTO solutions (year, day, part, input, output) VALUES (?, ?, ?, ?, ?)",
-        (year, day, part, input, output),
+        "INSERT INTO solutions (year, day, part, input, output) VALUES (?, ?, ?, '', ?)
+         ON CONFLICT(year, day, part) DO UPDATE SET output = excluded.output",
+        (year, day, part, output),
     )
     .await?;
     Ok(())
