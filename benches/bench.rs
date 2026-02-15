@@ -1,4 +1,4 @@
-use cli::solution::Solution;
+use cli::Solution;
 use libsql::Builder;
 use std::sync::LazyLock;
 

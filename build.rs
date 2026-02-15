@@ -2,42 +2,32 @@ use std::fs;
 use std::path::Path;
 
 fn main() {
-    let solutions_dir = Path::new("src/solutions");
+    let solutions_file = Path::new("src/solutions.rs");
     let out_path = Path::new("benches/bench.rs");
 
-    println!("cargo:rerun-if-changed=src/solutions");
+    println!("cargo:rerun-if-changed=src/solutions.rs");
 
     let mut entries: Vec<(u16, u8, u8)> = Vec::new();
 
-    for entry in fs::read_dir(solutions_dir).unwrap() {
-        let entry = entry.unwrap();
-        let name = entry.file_name().into_string().unwrap();
-
-        // Match y{YYYY}_d{DD}_p{P}.rs
-        let Some(name) = name.strip_suffix(".rs") else {
-            continue;
-        };
-        let parts: Vec<&str> = name.split('_').collect();
-        if parts.len() != 3 {
-            continue;
+    let content = fs::read_to_string(solutions_file).unwrap();
+    for line in content.lines() {
+        let line = line.trim();
+        // Match solution!(YYYY, DD, P, {
+        if let Some(rest) = line.strip_prefix("solution!(") {
+            let args: Vec<&str> = rest.splitn(4, ',').collect();
+            if args.len() >= 3 {
+                let year: u16 = args[0].trim().parse().unwrap();
+                let day: u8 = args[1].trim().parse().unwrap();
+                let part: u8 = args[2].trim().trim_end_matches('{').trim().parse().unwrap();
+                entries.push((year, day, part));
+            }
         }
-        let Some(year) = parts[0].strip_prefix('y').and_then(|s| s.parse::<u16>().ok()) else {
-            continue;
-        };
-        let Some(day) = parts[1].strip_prefix('d').and_then(|s| s.parse::<u8>().ok()) else {
-            continue;
-        };
-        let Some(part) = parts[2].strip_prefix('p').and_then(|s| s.parse::<u8>().ok()) else {
-            continue;
-        };
-
-        entries.push((year, day, part));
     }
 
     entries.sort();
 
     let mut code = String::new();
-    code.push_str("use cli::solution::Solution;\n");
+    code.push_str("use cli::Solution;\n");
     code.push_str("use libsql::Builder;\n");
     code.push_str("use std::sync::LazyLock;\n\n");
 
