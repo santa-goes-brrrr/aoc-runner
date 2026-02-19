@@ -53,7 +53,7 @@ fn generate_benches(entries: &[(u16, u8, u8)]) {
         .collect();
 
     let code = quote! {
-        use cli::Solution;
+        use aoc_runner::Solution;
         use libsql::Builder;
         use std::sync::LazyLock;
 
@@ -141,7 +141,7 @@ fn generate_tests(entries: &[(u16, u8, u8)]) {
         .collect();
 
     let code = quote! {
-        use cli::Solution;
+        use aoc_runner::Solution;
         use libsql::Builder;
         use std::sync::LazyLock;
 
