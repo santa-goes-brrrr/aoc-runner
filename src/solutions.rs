@@ -1,4 +1,7 @@
-solution!(2025, 01, 1, {
+use crate::solution;
+
+#[solution(2025, 1, 1)]
+mod s {
     fn solve(s: &str) -> u32 {
         let mut num_zeros: u32 = 0;
         let mut current: i32 = 50;
@@ -19,9 +22,10 @@ solution!(2025, 01, 1, {
 
         num_zeros
     }
-});
+}
 
-solution!(2025, 01, 2, {
+#[solution(2025, 1, 2)]
+mod s {
     fn solve(s: &str) -> i32 {
         let mut num_zeros: i32 = 0;
         let mut current: i32 = 50;
@@ -44,9 +48,10 @@ solution!(2025, 01, 2, {
 
         num_zeros
     }
-});
+}
 
-solution!(2025, 02, 1, {
+#[solution(2025, 2, 1)]
+mod s {
     use ahash::{HashMap, HashMapExt};
 
     fn is_invalid(n: u64) -> bool {
@@ -82,9 +87,10 @@ solution!(2025, 02, 1, {
 
         total
     }
-});
+}
 
-solution!(2025, 02, 2, {
+#[solution(2025, 2, 2)]
+mod s {
     use ahash::{HashMap, HashMapExt};
 
     // u64::MAX.ilog10() == 19
@@ -145,9 +151,10 @@ solution!(2025, 02, 2, {
 
         total
     }
-});
+}
 
-solution!(2025, 03, 1, {
+#[solution(2025, 3, 1)]
+mod s {
     fn solve(s: &str) -> u32 {
         let mut result: u32 = 0;
 
@@ -171,9 +178,10 @@ solution!(2025, 03, 1, {
 
         result
     }
-});
+}
 
-solution!(2025, 03, 2, {
+#[solution(2025, 3, 2)]
+mod s {
     fn solve(s: &str) -> u64 {
         let mut result: u64 = 0;
 
@@ -199,9 +207,10 @@ solution!(2025, 03, 2, {
 
         result
     }
-});
+}
 
-solution!(2025, 04, 1, {
+#[solution(2025, 4, 1)]
+mod s {
     use ahash::{HashSet, HashSetExt as _};
 
     fn num_neighbors(p: &(usize, usize), grid: &HashSet<(usize, usize)>) -> usize {
@@ -230,9 +239,10 @@ solution!(2025, 04, 1, {
 
         grid.iter().filter(|p| num_neighbors(p, &grid) < 4).count()
     }
-});
+}
 
-solution!(2025, 04, 2, {
+#[solution(2025, 4, 2)]
+mod s {
     use ahash::{HashSet, HashSetExt as _};
 
     fn num_neighbors(p: &(usize, usize), grid: &HashSet<(usize, usize)>) -> usize {
@@ -283,9 +293,10 @@ solution!(2025, 04, 2, {
 
         n - grid.len()
     }
-});
+}
 
-solution!(2025, 05, 1, {
+#[solution(2025, 5, 1)]
+mod s {
     use ahash::{HashSet, HashSetExt};
 
     type Range = (u64, u64);
@@ -312,9 +323,10 @@ solution!(2025, 05, 1, {
 
         chosen.len()
     }
-});
+}
 
-solution!(2025, 05, 2, {
+#[solution(2025, 5, 2)]
+mod s {
     type Range = (u64, u64);
 
     fn solve(s: &str) -> u64 {
@@ -348,9 +360,10 @@ solution!(2025, 05, 2, {
 
         res
     }
-});
+}
 
-solution!(2025, 06, 1, {
+#[solution(2025, 6, 1)]
+mod s {
     use ahash::{HashMap, HashMapExt};
 
     fn solve_p1<const N: usize>(s: &str) -> u128 {
@@ -385,9 +398,10 @@ solution!(2025, 06, 1, {
     fn solve(s: &str) -> u128 {
         solve_p1::<4>(s)
     }
-});
+}
 
-solution!(2025, 06, 2, {
+#[solution(2025, 6, 2)]
+mod s {
     use ahash::{HashMap, HashMapExt};
 
     fn solve_p2<const N: usize>(s: &str) -> u128 {
@@ -476,9 +490,10 @@ solution!(2025, 06, 2, {
     fn solve(s: &str) -> u128 {
         solve_p2::<4>(s)
     }
-});
+}
 
-solution!(2025, 07, 1, {
+#[solution(2025, 7, 1)]
+mod s {
     fn solve(s: &str) -> usize {
         let width = s.chars().position(|c| c == '\n').unwrap();
         let height = s.chars().filter(|&c| c == '\n').count() - 1;
@@ -533,9 +548,10 @@ solution!(2025, 07, 1, {
 
         res
     }
-});
+}
 
-solution!(2025, 07, 2, {
+#[solution(2025, 7, 2)]
+mod s {
     fn solve(s: &str) -> u64 {
         let width = s.chars().position(|c| c == '\n').unwrap();
         let height = s.chars().filter(|&c| c == '\n').count() - 1;
@@ -584,9 +600,10 @@ solution!(2025, 07, 2, {
 
         paths[height - 1].iter().sum()
     }
-});
+}
 
-solution!(2025, 08, 1, {
+#[solution(2025, 8, 1)]
+mod s {
     use ahash::{HashSet, HashSetExt};
     use std::collections::BinaryHeap;
 
@@ -670,9 +687,10 @@ solution!(2025, 08, 1, {
 
         sizes.iter().rev().take(3).product()
     }
-});
+}
 
-solution!(2025, 08, 2, {
+#[solution(2025, 8, 2)]
+mod s {
     fn find(parent: &mut Vec<usize>, x: usize) -> usize {
         if parent[x] != x {
             parent[x] = find(parent, parent[x]);
@@ -738,9 +756,10 @@ solution!(2025, 08, 2, {
 
         unreachable!();
     }
-});
+}
 
-solution!(2025, 09, 1, {
+#[solution(2025, 9, 1)]
+mod s {
     fn compute_area(a: &(usize, usize), b: &(usize, usize)) -> usize {
         let p = (a.0.min(b.0), a.1.min(b.1));
         let q = (a.0.max(b.0), a.1.max(b.1));
@@ -772,9 +791,10 @@ solution!(2025, 09, 1, {
 
         res
     }
-});
+}
 
-solution!(2025, 09, 2, {
+#[solution(2025, 9, 2)]
+mod s {
     fn normalize(p: &(u64, u64), q: &(u64, u64)) -> ((u64, u64), (u64, u64)) {
         ((p.0.min(q.0), p.1.min(q.1)), (p.0.max(q.0), p.1.max(q.1)))
     }
@@ -826,9 +846,10 @@ solution!(2025, 09, 2, {
 
         unreachable!()
     }
-});
+}
 
-solution!(2025, 10, 1, {
+#[solution(2025, 10, 1)]
+mod s {
     use std::collections::{HashSet, VecDeque};
 
     fn solve(s: &str) -> usize {
@@ -885,9 +906,10 @@ solution!(2025, 10, 1, {
 
         res
     }
-});
+}
 
-solution!(2025, 10, 2, {
+#[solution(2025, 10, 2)]
+mod s {
     use z3::{
         Optimize,
         ast::{Ast, Int},
@@ -980,9 +1002,10 @@ solution!(2025, 10, 2, {
 
         res
     }
-});
+}
 
-solution!(2025, 11, 1, {
+#[solution(2025, 11, 1)]
+mod s {
     use ahash::{HashMap, HashMapExt};
     use petgraph::{algo::all_simple_paths, graph::DiGraph};
     use std::hash::RandomState;
@@ -1014,9 +1037,10 @@ solution!(2025, 11, 1, {
 
         all_simple_paths::<Box<_>, _, RandomState>(&graph, *you, *out, 0, None).count()
     }
-});
+}
 
-solution!(2025, 11, 2, {
+#[solution(2025, 11, 2)]
+mod s {
     use ahash::{HashMap, HashMapExt};
     use pathfinding::prelude::count_paths;
 
@@ -1055,9 +1079,10 @@ solution!(2025, 11, 2, {
 
         svr_fft * fft_dac * dac_out + svr_dac * dac_fft * fft_out
     }
-});
+}
 
-solution!(2025, 12, 1, {
+#[solution(2025, 12, 1)]
+mod s {
     type Shape = [[bool; 3]; 3];
 
     fn solve(s: &str) -> usize {
@@ -1110,4 +1135,4 @@ solution!(2025, 12, 1, {
 
         solvable
     }
-});
+}

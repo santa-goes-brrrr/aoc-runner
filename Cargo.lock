@@ -98,6 +98,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a23eb6b1614318a8071c9b2521f36b424b2c83db5eb3a0fead4a6c0809af6e61"
 
 [[package]]
+name = "aoc-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "async-stream"
 version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -380,14 +389,17 @@ name = "cli"
 version = "0.1.0"
 dependencies = [
  "ahash",
+ "aoc-macros",
  "clap",
  "divan",
  "inventory",
  "libsql",
- "libtest-mimic",
- "paste",
  "pathfinding",
  "petgraph",
+ "prettyplease",
+ "proc-macro2",
+ "quote",
+ "syn",
  "tokio",
  "z3",
 ]
@@ -522,12 +534,6 @@ dependencies = [
  "libc",
  "windows-sys 0.61.2",
 ]
-
-[[package]]
-name = "escape8259"
-version = "0.5.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5692dd7b5a1978a5aeb0ce83b7655c58ca8efdcb79d21036ea249da95afec2c6"
 
 [[package]]
 name = "fallible-iterator"
@@ -1118,18 +1124,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "libtest-mimic"
-version = "0.8.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5297962ef19edda4ce33aaa484386e0a5b3d7f2f4e037cbeee00503ef6b29d33"
-dependencies = [
- "anstream",
- "anstyle",
- "clap",
- "escape8259",
-]
-
-[[package]]
 name = "linux-raw-sys"
 version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1314,12 +1308,6 @@ dependencies = [
  "smallvec",
  "windows-link",
 ]
-
-[[package]]
-name = "paste"
-version = "1.0.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
 name = "pathfinding"

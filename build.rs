@@ -1,9 +1,11 @@
 use std::fs;
 use std::path::Path;
 
+use proc_macro2::{Literal, TokenStream};
+use quote::{format_ident, quote};
+
 fn main() {
     let solutions_file = Path::new("src/solutions.rs");
-    let out_path = Path::new("benches/bench.rs");
 
     println!("cargo:rerun-if-changed=src/solutions.rs");
 
@@ -12,84 +14,190 @@ fn main() {
     let content = fs::read_to_string(solutions_file).unwrap();
     for line in content.lines() {
         let line = line.trim();
-        // Match solution!(YYYY, DD, P, {
-        if let Some(rest) = line.strip_prefix("solution!(") {
-            let args: Vec<&str> = rest.splitn(4, ',').collect();
-            if args.len() >= 3 {
-                let year: u16 = args[0].trim().parse().unwrap();
-                let day: u8 = args[1].trim().parse().unwrap();
-                let part: u8 = args[2].trim().trim_end_matches('{').trim().parse().unwrap();
-                entries.push((year, day, part));
+        if let Some(rest) = line.strip_prefix("#[solution(") {
+            if let Some(args_str) = rest.strip_suffix(")]") {
+                let args: Vec<&str> = args_str.splitn(3, ',').collect();
+                if args.len() == 3 {
+                    let year: u16 = args[0].trim().parse().unwrap();
+                    let day: u8 = args[1].trim().parse().unwrap();
+                    let part: u8 = args[2].trim().parse().unwrap();
+                    entries.push((year, day, part));
+                }
             }
         }
     }
 
     entries.sort();
 
-    let mut code = String::new();
-    code.push_str("use cli::Solution;\n");
-    code.push_str("use libsql::Builder;\n");
-    code.push_str("use std::sync::LazyLock;\n\n");
+    generate_benches(&entries);
+    generate_tests(&entries);
+}
 
-    code.push_str("fn main() {\n");
-    code.push_str("    divan::main();\n");
-    code.push_str("}\n\n");
+fn generate_benches(entries: &[(u16, u8, u8)]) {
+    let bench_fns: Vec<TokenStream> = entries
+        .iter()
+        .map(|(year, day, part)| {
+            let fn_name = format_ident!("y{}_d{:02}_p{}", year, day, part);
+            let year_lit = Literal::u16_unsuffixed(*year);
+            let day_lit = Literal::u8_unsuffixed(*day);
+            let part_lit = Literal::u8_unsuffixed(*part);
 
-    code.push_str("struct Input {\n");
-    code.push_str("    data: String,\n");
-    code.push_str("    solve: Box<dyn Fn(&str) -> String + Send + Sync>,\n");
-    code.push_str("}\n\n");
+            quote! {
+                #[divan::bench]
+                fn #fn_name(bencher: divan::Bencher) {
+                    let input = find_input(#year_lit, #day_lit, #part_lit);
+                    bencher.bench_local(|| (input.solve)(&input.data));
+                }
+            }
+        })
+        .collect();
 
-    code.push_str("static INPUTS: LazyLock<Vec<(u16, u8, u8, Input)>> = LazyLock::new(|| {\n");
-    code.push_str("    let rt = tokio::runtime::Runtime::new().unwrap();\n");
-    code.push_str(
-        "    let db_path = std::path::Path::new(env!(\"CARGO_MANIFEST_DIR\")).join(\"aoc.db\");\n",
-    );
-    code.push_str(
-        "    let db = rt.block_on(Builder::new_local(db_path).build()).unwrap();\n",
-    );
-    code.push_str("    let conn = db.connect().unwrap();\n\n");
-    code.push_str("    inventory::iter::<&dyn Solution>\n");
-    code.push_str("        .into_iter()\n");
-    code.push_str("        .filter_map(|solution| {\n");
-    code.push_str("            let year = solution.year();\n");
-    code.push_str("            let day = solution.day();\n");
-    code.push_str("            let part = solution.part();\n\n");
-    code.push_str("            let mut rows = rt.block_on(conn.query(\n");
-    code.push_str("                \"SELECT input FROM solutions WHERE year = ? AND day = ? AND part = ?\",\n");
-    code.push_str("                (year, day, part),\n");
-    code.push_str("            )).ok()?;\n\n");
-    code.push_str("            let row = rt.block_on(rows.next()).ok()??;\n");
-    code.push_str("            let input: String = row.get(0).ok()?;\n");
-    code.push_str("            if input.is_empty() { return None; }\n\n");
-    code.push_str("            let s: &'static &'static dyn Solution = solution;\n");
-    code.push_str("            Some((year, day, part, Input {\n");
-    code.push_str("                data: input,\n");
-    code.push_str("                solve: Box::new(move |input: &str| s.solve(input)),\n");
-    code.push_str("            }))\n");
-    code.push_str("        })\n");
-    code.push_str("        .collect()\n");
-    code.push_str("});\n\n");
+    let code = quote! {
+        use cli::Solution;
+        use libsql::Builder;
+        use std::sync::LazyLock;
 
-    code.push_str("fn find_input(year: u16, day: u8, part: u8) -> &'static Input {\n");
-    code.push_str("    &INPUTS.iter()\n");
-    code.push_str("        .find(|(y, d, p, _)| *y == year && *d == day && *p == part)\n");
-    code.push_str("        .unwrap_or_else(|| panic!(\"no input for {year}-{day:02}-{part}\"))\n");
-    code.push_str("        .3\n");
-    code.push_str("}\n\n");
+        fn main() {
+            divan::main();
+        }
 
-    for (year, day, part) in &entries {
-        code.push_str(&format!(
-            "#[divan::bench]\nfn y{year}_d{day:02}_p{part}(bencher: divan::Bencher) {{\n"
-        ));
-        code.push_str(&format!(
-            "    let input = find_input({year}, {day}, {part});\n"
-        ));
-        code.push_str(
-            "    bencher.bench_local(|| (input.solve)(&input.data));\n",
-        );
-        code.push_str("}\n\n");
-    }
+        struct Input {
+            data: String,
+            solve: Box<dyn Fn(&str) -> String + Send + Sync>,
+        }
 
-    fs::write(out_path, code).unwrap();
+        static INPUTS: LazyLock<Vec<(u16, u8, u8, Input)>> = LazyLock::new(|| {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let db_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("aoc.db");
+            let db = rt.block_on(Builder::new_local(db_path).build()).unwrap();
+            let conn = db.connect().unwrap();
+
+            inventory::iter::<&dyn Solution>
+                .into_iter()
+                .filter_map(|solution| {
+                    let year = solution.year();
+                    let day = solution.day();
+                    let part = solution.part();
+
+                    let mut rows = rt.block_on(conn.query(
+                        "SELECT input FROM solutions WHERE year = ? AND day = ? AND part = ?",
+                        (year, day, part),
+                    )).ok()?;
+
+                    let row = rt.block_on(rows.next()).ok()??;
+                    let input: String = row.get(0).ok()?;
+                    if input.is_empty() { return None; }
+
+                    let s: &'static &'static dyn Solution = solution;
+                    Some((year, day, part, Input {
+                        data: input,
+                        solve: Box::new(move |input: &str| s.solve(input)),
+                    }))
+                })
+                .collect()
+        });
+
+        fn find_input(year: u16, day: u8, part: u8) -> &'static Input {
+            &INPUTS.iter()
+                .find(|(y, d, p, _)| *y == year && *d == day && *p == part)
+                .unwrap_or_else(|| panic!("no input for {year}-{day:02}-{part}"))
+                .3
+        }
+
+        #(#bench_fns)*
+    };
+
+    write_generated(Path::new("benches/bench.rs"), code);
+}
+
+fn generate_tests(entries: &[(u16, u8, u8)]) {
+    let test_fns: Vec<TokenStream> = entries
+        .iter()
+        .map(|(year, day, part)| {
+            let fn_name = format_ident!("y{}_d{:02}_p{}", year, day, part);
+            let year_lit = Literal::u16_unsuffixed(*year);
+            let day_lit = Literal::u8_unsuffixed(*day);
+            let part_lit = Literal::u8_unsuffixed(*part);
+
+            quote! {
+                #[test]
+                fn #fn_name() {
+                    let entry = find_entry(#year_lit, #day_lit, #part_lit);
+                    if entry.input.is_empty() || entry.expected.is_empty() {
+                        return;
+                    }
+                    let actual = (entry.solve)(&entry.input);
+                    assert_eq!(
+                        actual.trim(),
+                        entry.expected.trim(),
+                        "year {} day {} part {}: expected '{}', got '{}'",
+                        #year_lit, #day_lit, #part_lit,
+                        entry.expected.trim(),
+                        actual.trim(),
+                    );
+                }
+            }
+        })
+        .collect();
+
+    let code = quote! {
+        use cli::Solution;
+        use libsql::Builder;
+        use std::sync::LazyLock;
+
+        struct TestEntry {
+            input: String,
+            expected: String,
+            solve: Box<dyn Fn(&str) -> String + Send + Sync>,
+        }
+
+        static ENTRIES: LazyLock<Vec<(u16, u8, u8, TestEntry)>> = LazyLock::new(|| {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let db_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("aoc.db");
+            let db = rt.block_on(Builder::new_local(db_path).build()).unwrap();
+            let conn = db.connect().unwrap();
+
+            inventory::iter::<&dyn Solution>
+                .into_iter()
+                .filter_map(|solution| {
+                    let year = solution.year();
+                    let day = solution.day();
+                    let part = solution.part();
+
+                    let mut rows = rt.block_on(conn.query(
+                        "SELECT input, output FROM solutions WHERE year = ? AND day = ? AND part = ?",
+                        (year, day, part),
+                    )).ok()?;
+
+                    let row = rt.block_on(rows.next()).ok()??;
+                    let input: String = row.get(0).ok()?;
+                    let expected: String = row.get(1).ok()?;
+
+                    let s: &'static &'static dyn Solution = solution;
+                    Some((year, day, part, TestEntry {
+                        input,
+                        expected,
+                        solve: Box::new(move |input: &str| s.solve(input)),
+                    }))
+                })
+                .collect()
+        });
+
+        fn find_entry(year: u16, day: u8, part: u8) -> &'static TestEntry {
+            &ENTRIES.iter()
+                .find(|(y, d, p, _)| *y == year && *d == day && *p == part)
+                .unwrap_or_else(|| panic!("no entry for {year}-{day:02}-{part}"))
+                .3
+        }
+
+        #(#test_fns)*
+    };
+
+    write_generated(Path::new("tests/verify.rs"), code);
+}
+
+fn write_generated(path: &Path, code: TokenStream) {
+    let syntax_tree = syn::parse2(code).unwrap();
+    let formatted = prettyplease::unparse(&syntax_tree);
+    fs::write(path, format!("// @generated by build.rs — do not edit\n\n{formatted}")).unwrap();
 }
