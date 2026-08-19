@@ -22,10 +22,10 @@ An RVV instruction counts as one instruction regardless of active vector length 
 
 - Rust stable (1.97.1 used by the current evaluator) with `riscv64gc-unknown-none-elf`, configured by `rust-toolchain.toml`
 - QEMU system emulator with RISC-V and plugin support (developed against QEMU 11.1)
-- `qemu-plugin.h`, a C compiler, `pkg-config`, and GLib development headers
+- `qemu-plugin.h`, CMake, a C compiler, `pkg-config`, and GLib development headers
 - `nm` from binutils
 
-The CLI automatically builds `evaluator/roi-counter.c` when its plugin is missing or stale.
+The CLI automatically configures and incrementally builds `evaluator/roi-counter.c` with CMake when its plugin is missing or stale. CMake also generates `target/aoc-evaluator/compile_commands.json` for `clangd`.
 
 ## Running solutions
 

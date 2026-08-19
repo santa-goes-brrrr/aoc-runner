@@ -896,25 +896,60 @@ async fn evaluate_binary(
 
 fn ensure_plugin() -> Result<(), String> {
     let plugin = Path::new("target/aoc-evaluator/roi-counter.so");
-    let source = Path::new("evaluator/roi-counter.c");
-    let stale = match (fs::metadata(plugin), fs::metadata(source)) {
-        (Ok(plugin), Ok(source)) => source.modified().ok() > plugin.modified().ok(),
-        _ => true,
-    };
+    let inputs = [
+        Path::new("evaluator/CMakeLists.txt"),
+        Path::new("evaluator/roi-counter.c"),
+    ];
+    let stale = fs::metadata(plugin)
+        .and_then(|metadata| metadata.modified())
+        .map_or(true, |plugin_modified| {
+            inputs.iter().any(|input| {
+                fs::metadata(input)
+                    .and_then(|metadata| metadata.modified())
+                    .map_or(true, |input_modified| input_modified > plugin_modified)
+            })
+        });
     if !stale {
         return Ok(());
     }
 
-    let output = Command::new("bash")
-        .arg("evaluator/build-plugin.sh")
+    let configure = Command::new("cmake")
+        .args([
+            "-S",
+            "evaluator",
+            "-B",
+            "target/aoc-evaluator",
+            "-DCMAKE_BUILD_TYPE=Release",
+            "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
+        ])
+        .output()
+        .map_err(|error| format!("Failed to configure QEMU plugin: {error}"))?;
+    if !configure.status.success() {
+        let stderr = String::from_utf8_lossy(&configure.stderr);
+        return Err(format!(
+            "Failed to configure QEMU plugin: {}",
+            last_nonempty_line(&stderr)
+        ));
+    }
+
+    let build = Command::new("cmake")
+        .args([
+            "--build",
+            "target/aoc-evaluator",
+            "--config",
+            "Release",
+            "--target",
+            "roi-counter",
+        ])
         .output()
         .map_err(|error| format!("Failed to build QEMU plugin: {error}"))?;
-    if output.status.success() {
+    if build.status.success() {
         Ok(())
     } else {
+        let stderr = String::from_utf8_lossy(&build.stderr);
         Err(format!(
             "Failed to build QEMU plugin: {}",
-            last_nonempty_line(&String::from_utf8_lossy(&output.stderr))
+            last_nonempty_line(&stderr)
         ))
     }
 }
