@@ -12,7 +12,8 @@ Solutions run without an operating system under QEMU on a fixed vector-capable t
 - Vector length: **VLEN=256**
 - Maximum element width: **ELEN=64**
 - Guest RAM: 256 MiB
-- Host timeout: 10 seconds
+- Per-solution instruction budget: 2,000,000,000
+- Host watchdog timeout: 10 seconds
 - Score: architectural instructions retired inside the solver region
 
 An RVV instruction counts as one instruction regardless of active vector length or LMUL. Efficient use of vector instructions is intentionally rewarded.
@@ -42,7 +43,7 @@ cargo run -p cli --release -- run all --jobs 4
 cargo run -p cli --release -- compare
 ```
 
-`run all` and `compare` compile all requested binaries in one Cargo invocation, allowing Cargo to schedule compilation in parallel, and then run independent QEMU processes concurrently. QEMU defaults to one worker per available host thread; use `--jobs N` to cap it, with each active worker reserving 256 MiB of guest RAM. Cargo uses `--keep-going`, so successfully built solutions are still evaluated when another binary fails to compile, although the overall command reports an error. Progress and results are emitted as append-only log lines without terminal overwrites. The comparison report shows exact instruction-count differences per puzzle and a geometric-mean change across comparable solutions.
+`run all` and `compare` compile all requested binaries in one Cargo invocation, allowing Cargo to schedule compilation in parallel, and then run independent QEMU processes concurrently. QEMU defaults to one worker per available host thread; use `--jobs N` to cap it, with each active worker reserving 256 MiB of guest RAM. Cargo uses `--keep-going`, so successfully built solutions are still evaluated when another binary fails to compile, although the overall command reports an error. Compilation messages remain append-only. On an interactive terminal, each active solution gets a logarithmic progress bar on its first non-zero update; it updates in place at 100,000, 200,000, 400,000, and subsequent doubling thresholds, and its final result replaces the bar message instead of adding another line. Progress bars are hidden and results remain line-oriented when output is redirected. The comparison report shows exact instruction-count differences per puzzle and a geometric-mean change across comparable solutions.
 
 ## How evaluation works
 
@@ -50,11 +51,11 @@ cargo run -p cli --release -- compare
 2. It creates 256 MiB of file-backed guest RAM.
 3. QEMU loads a versioned input packet at guest address `0x8c000000`.
 4. The bare-metal runtime validates the packet and passes a zero-copy `&str` to the solver.
-5. A QEMU TCG plugin counts instructions between trusted ROI symbols around the solver call.
+5. A QEMU TCG plugin counts instructions between trusted ROI symbols, publishes logarithmic progress, and flags the run if it exceeds 2 billion instructions.
 6. The runtime writes a materialized integer answer to a mailbox at `0x8d000000` and exits through QEMU's test-finisher device.
 7. The host reads the mailbox, hashes the returned answer, and compares it with the hash in `aoc.db`.
 
-Parsing, allocation, solver logic, and called library code are measured. Boot, input validation, mailbox writes, and shutdown are excluded.
+Parsing, allocation, solver logic, and called library code are measured. Boot, input validation, mailbox writes, and shutdown are excluded. The instruction budget is the deterministic solver limit; the 10-second wall-clock watchdog remains as a fallback for stalls before the ROI, QEMU failures, or plugin failures.
 
 ## Writing a solution
 

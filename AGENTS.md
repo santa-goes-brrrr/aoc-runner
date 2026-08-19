@@ -13,7 +13,8 @@ Advent of Code solutions optimized for executed RISC-V instruction count. Rust 2
 - Guest RAM: 256 MiB at `0x80000000`
 - Input packet: `0x8c000000`, maximum 16 MiB including header
 - Output mailbox: `0x8d000000`
-- Host execution timeout: 10 seconds
+- Per-solution instruction budget: 2,000,000,000
+- Host watchdog timeout: 10 seconds
 - One vCPU; no guest OS
 - Score: instructions between `__aoc_roi_start` and `__aoc_roi_end`
 
@@ -79,7 +80,7 @@ cargo build -p cli --release
 ./evaluator/build-plugin.sh
 ```
 
-Bulk runs compile all requested binaries in one `cargo build --keep-going` invocation so Cargo can schedule compilation in parallel, then evaluate successful artifacts in bounded parallel QEMU workers. A failed binary is reported without preventing successful binaries from running, but the overall command still fails. Each QEMU worker uses one vCPU and 256 MiB of guest RAM; concurrency defaults to available host threads and can be capped with `--jobs`. CLI progress and results use append-only log lines without terminal overwrites. A solution is successful only when QEMU exits within 10 seconds, the guest reports a complete ROI, and the host-computed answer hash matches the database.
+Bulk runs compile all requested binaries in one `cargo build --keep-going` invocation so Cargo can schedule compilation in parallel, then evaluate successful artifacts in bounded parallel QEMU workers. A failed binary is reported without preventing successful binaries from running, but the overall command still fails. Each QEMU worker uses one vCPU and 256 MiB of guest RAM; concurrency defaults to available host threads and can be capped with `--jobs`. Compilation messages are append-only. Interactive instruction progress lazily creates in-place multi-progress bars on the first non-zero update, starting at 100,000 instructions and doubling per bar increment; each final result replaces its bar message. Bars are hidden and results remain line-oriented for redirected output. A solution is successful only when it stays within the 2-billion-instruction budget, QEMU exits within the 10-second watchdog, the guest reports a complete ROI, and the host-computed answer hash matches the database.
 
 ## Host/guest protocol
 
@@ -87,7 +88,7 @@ The CLI writes a little-endian input packet containing magic `AOCIN001`, protoco
 
 The runtime writes output magic `AOCOUT01`, protocol version, state, signed/unsigned answer kind, and a 128-bit answer into file-backed guest RAM. It writes the completed state last, fences memory, then exits via the QEMU `virt` test-finisher. The host reads the mailbox only after QEMU exits. Expected answers are never provided to the guest.
 
-The TCG plugin receives ROI addresses extracted from the ELF with `nm` and writes `completed` plus the instruction count to a host-side score file.
+The TCG plugin receives ROI addresses extracted from the ELF with `nm` and writes `completed` plus the final instruction count to a host-side score file. During execution it updates a 24-byte little-endian shared progress mailbox (`AOCPROG1`, version, state, instruction count) at doubling thresholds and when the instruction budget is exceeded. The host polls this mailbox every 25 ms, updates interactive progress bars in place, and terminates over-budget QEMU workers. The wall-clock watchdog remains a fallback for pre-ROI and infrastructure stalls.
 
 ## CLI database commands
 

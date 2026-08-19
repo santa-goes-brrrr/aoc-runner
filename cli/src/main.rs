@@ -3,6 +3,7 @@ use aoc_runtime::{
     OUTPUT_MAILBOX_SIZE, PROTOCOL_VERSION, RAM_BASE, RAM_SIZE, STATE_OK,
 };
 use clap::{Parser, Subcommand};
+use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle};
 use libsql::{Builder, Connection};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -13,10 +14,17 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::task::JoinSet;
-use tokio::time::timeout;
+use tokio::time::{MissedTickBehavior, interval, sleep};
 
 const TARGET: &str = "riscv64gc-unknown-none-elf";
 const HOST_TIMEOUT: Duration = Duration::from_secs(10);
+const PROGRESS_POLL_INTERVAL: Duration = Duration::from_millis(25);
+const INSTRUCTION_BUDGET: u64 = 2_000_000_000;
+const PROGRESS_INITIAL_THRESHOLD: u64 = 100_000;
+const PROGRESS_MAGIC: &[u8; 8] = b"AOCPROG1";
+const PROGRESS_VERSION: u32 = 1;
+const PROGRESS_MAILBOX_SIZE: u64 = 24;
+const PROGRESS_BUDGET_EXCEEDED: u32 = 3;
 const GREEN: &str = "\x1b[32m";
 const RED: &str = "\x1b[31m";
 const YELLOW: &str = "\x1b[33m";
@@ -132,7 +140,6 @@ struct RunResult {
     day: u8,
     part: u8,
     passed: bool,
-    actual: String,
     instructions: Option<u64>,
     error: Option<String>,
 }
@@ -162,7 +169,13 @@ struct RunSummary {
     passed: usize,
     errors: usize,
     timeouts: usize,
+    budget_exceeded: usize,
     total_instructions: u128,
+}
+
+struct ProgressSnapshot {
+    state: u32,
+    instructions: u64,
 }
 
 #[derive(Clone)]
@@ -208,7 +221,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Run { command } => match command {
             RunCommands::One { year, day, part } => {
                 let result = run_solution(&connection, year, day, part).await?;
-                print_run_result(&result);
                 if !result.passed {
                     std::process::exit(1);
                 }
@@ -216,10 +228,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             RunCommands::All { jobs } => {
                 let summary = run_all_solutions(&connection, job_count(jobs)).await?;
                 println!(
-                    "\n{GREEN}✓ {} passed{RESET}, {RED}✗ {} errors{RESET}, {YELLOW}⧖ {} timeouts{RESET} ({} instructions)",
-                    summary.passed, summary.errors, summary.timeouts, summary.total_instructions
+                    "\nRun completed in {} instructions\n{} passed, {} errors, {} timeouts, {} over budget",
+                    summary.total_instructions,
+                    summary.passed,
+                    summary.errors,
+                    summary.timeouts,
+                    summary.budget_exceeded
                 );
-                if summary.errors > 0 || summary.timeouts > 0 {
+                if summary.errors > 0 || summary.timeouts > 0 || summary.budget_exceeded > 0 {
                     std::process::exit(1);
                 }
             }
@@ -392,18 +408,46 @@ fn print_run_result(result: &RunResult) {
     let label = format!("{}-{:02}-{}", result.year, result.day, result.part);
     if result.passed {
         println!(
-            "{GREEN}✓ {label} Correct ({} instructions){RESET}",
+            "{GREEN}✓ {label} Correct after {} instructions{RESET}",
             result.instructions.unwrap_or(0)
         );
     } else if let Some(error) = &result.error {
-        let color = if error == "Timeout" { YELLOW } else { RED };
+        let color = if error == "Timeout" || is_instruction_budget_error(error) {
+            YELLOW
+        } else {
+            RED
+        };
         println!("{color}✗ {label} {error}{RESET}");
     } else {
         println!(
-            "{RED}✗ {label} Wrong answer '{}' ({} instructions){RESET}",
-            result.actual.trim(),
+            "{RED}✗ {label} Wrong answer after {} instructions{RESET}",
             result.instructions.unwrap_or(0)
         );
+    }
+}
+
+fn progress_result_message(result: &RunResult) -> String {
+    if result.passed {
+        format!(
+            "Correct after {} instructions",
+            result.instructions.unwrap_or(0)
+        )
+    } else if let Some(error) = &result.error {
+        error.clone()
+    } else {
+        format!(
+            "Wrong answer after {} instructions",
+            result.instructions.unwrap_or(0)
+        )
+    }
+}
+
+fn finish_progress(progress: &ProgressBar, result: &RunResult) {
+    if progress.is_hidden() {
+        progress.finish_and_clear();
+        print_run_result(result);
+    } else {
+        progress.abandon_with_message(progress_result_message(result));
     }
 }
 
@@ -547,8 +591,20 @@ fn build_solutions(cases: &[SolutionCase]) -> Result<BuildReport, String> {
     })
 }
 
-async fn evaluate_solution(case: SolutionCase) -> RunResult {
-    match evaluate_binary(&case.binary, &case.input, &case.label).await {
+async fn evaluate_solution(
+    case: SolutionCase,
+    progress: ProgressBar,
+    multi: Option<MultiProgress>,
+) -> RunResult {
+    let result = match evaluate_binary(
+        &case.binary,
+        &case.input,
+        &case.label,
+        &progress,
+        multi.as_ref(),
+    )
+    .await
+    {
         Ok(evaluation) => RunResult {
             year: case.year,
             day: case.day,
@@ -560,12 +616,13 @@ async fn evaluate_solution(case: SolutionCase) -> RunResult {
                 case.part,
                 &evaluation.actual,
             ),
-            actual: evaluation.actual,
             instructions: Some(evaluation.instructions),
             error: None,
         },
         Err(error) => failed_result(case.year, case.day, case.part, error),
-    }
+    };
+    finish_progress(&progress, &result);
+    result
 }
 
 async fn run_solution(
@@ -577,11 +634,14 @@ async fn run_solution(
     let case = load_solution_case(connection, year, day, part).await?;
     print_progress(&format!("{} Compiling for {TARGET}...", case.label));
     if let Err(error) = build_solution(&case) {
-        return Ok(failed_result(year, day, part, error));
+        let result = failed_result(year, day, part, error);
+        print_run_result(&result);
+        return Ok(result);
     }
 
     print_progress(&format!("{} Evaluating in QEMU...", case.label));
-    Ok(evaluate_solution(case).await)
+    let progress = solution_progress_bar(&case.label);
+    Ok(evaluate_solution(case, progress, None).await)
 }
 
 fn failed_result(year: u16, day: u8, part: u8, error: String) -> RunResult {
@@ -590,22 +650,112 @@ fn failed_result(year: u16, day: u8, part: u8, error: String) -> RunResult {
         day,
         part,
         passed: false,
-        actual: String::new(),
         instructions: None,
         error: Some(error),
     }
 }
 
-async fn evaluate_binary(binary: &Path, input: &str, label: &str) -> Result<Evaluation, String> {
+fn instruction_budget_error() -> String {
+    format!("Instruction budget exceeded ({INSTRUCTION_BUDGET} instructions)")
+}
+
+fn is_instruction_budget_error(error: &str) -> bool {
+    error.starts_with("Instruction budget exceeded")
+}
+
+fn read_progress_snapshot(file: &mut File) -> Result<Option<ProgressSnapshot>, String> {
+    let mut bytes = [0_u8; PROGRESS_MAILBOX_SIZE as usize];
+    file.seek(SeekFrom::Start(0))
+        .and_then(|_| file.read_exact(&mut bytes))
+        .map_err(|error| format!("Cannot read instruction progress: {error}"))?;
+    if &bytes[..8] != PROGRESS_MAGIC {
+        return Ok(None);
+    }
+    let version = read_u32(&bytes, 8);
+    if version != PROGRESS_VERSION {
+        return Err(format!("Unsupported progress protocol version {version}"));
+    }
+    Ok(Some(ProgressSnapshot {
+        state: read_u32(&bytes, 12),
+        instructions: read_u64(&bytes, 16),
+    }))
+}
+
+fn progress_level(instructions: u64) -> u64 {
+    let units = instructions / PROGRESS_INITIAL_THRESHOLD;
+    if units == 0 {
+        0
+    } else {
+        u64::from(u64::BITS - units.leading_zeros())
+    }
+}
+
+fn solution_progress_bar(label: &str) -> ProgressBar {
+    let levels = progress_level(INSTRUCTION_BUDGET);
+    let template = format!("{{prefix}} [{{bar:{levels}.cyan/blue}}] {{msg}}");
+    let bar = ProgressBar::hidden();
+    bar.set_length(levels);
+    if let Ok(style) = ProgressStyle::with_template(&template) {
+        bar.set_style(style.progress_chars("#>-"));
+    }
+    bar.set_prefix(label.to_string());
+    bar.set_message("In progress at 0 instructions");
+    bar
+}
+
+fn observe_progress(
+    file: &mut File,
+    bar: &ProgressBar,
+    multi: Option<&MultiProgress>,
+    attached: &mut bool,
+    last_instructions: &mut u64,
+) -> Result<bool, String> {
+    let Some(snapshot) = read_progress_snapshot(file)? else {
+        return Ok(false);
+    };
+
+    if snapshot.instructions != *last_instructions {
+        *last_instructions = snapshot.instructions;
+        bar.set_message(format!(
+            "In progress at {} instructions",
+            snapshot.instructions
+        ));
+        bar.set_position(progress_level(snapshot.instructions));
+        if !*attached {
+            if let Some(multi) = multi {
+                multi.add(bar.clone());
+            } else {
+                bar.set_draw_target(ProgressDrawTarget::stderr());
+            }
+            bar.tick();
+            *attached = true;
+        }
+    }
+    Ok(snapshot.state == PROGRESS_BUDGET_EXCEEDED || snapshot.instructions > INSTRUCTION_BUDGET)
+}
+
+async fn evaluate_binary(
+    binary: &Path,
+    input: &str,
+    label: &str,
+    progress: &ProgressBar,
+    multi: Option<&MultiProgress>,
+) -> Result<Evaluation, String> {
     ensure_plugin()?;
     let run_directory = RunDirectory::create(label).map_err(|error| error.to_string())?;
     let ram_path = run_directory.path().join("guest.ram");
     let input_path = run_directory.path().join("input.packet");
-    let _score_path = run_directory.path().join("score.txt");
+    let progress_path = run_directory.path().join("progress.bin");
+    let score_path = run_directory.path().join("score.txt");
 
     File::create(&ram_path)
         .and_then(|file| file.set_len(RAM_SIZE as u64))
         .map_err(|error| format!("Cannot create guest RAM: {error}"))?;
+    File::create(&progress_path)
+        .and_then(|file| file.set_len(PROGRESS_MAILBOX_SIZE))
+        .map_err(|error| format!("Cannot create progress mailbox: {error}"))?;
+    let mut progress_file = File::open(&progress_path)
+        .map_err(|error| format!("Cannot open progress mailbox: {error}"))?;
     write_input_packet(&input_path, input.as_bytes())?;
 
     let start = find_symbol(binary, "__aoc_roi_start")?;
@@ -614,7 +764,7 @@ async fn evaluate_binary(binary: &Path, input: &str, label: &str) -> Result<Eval
         .map_err(|error| format!("Cannot locate QEMU plugin: {error}"))?;
     let ram_path = fs::canonicalize(&ram_path).map_err(|error| error.to_string())?;
     let input_path = fs::canonicalize(&input_path).map_err(|error| error.to_string())?;
-    let score_path = run_directory.path().join("score.txt");
+    let progress_path = fs::canonicalize(&progress_path).map_err(|error| error.to_string())?;
     let score_absolute = std::env::current_dir()
         .map_err(|error| error.to_string())?
         .join(&score_path);
@@ -628,9 +778,10 @@ async fn evaluate_binary(binary: &Path, input: &str, label: &str) -> Result<Eval
         input_path.display()
     );
     let plugin_argument = format!(
-        "{},start=0x{start:x},stop=0x{stop:x},out={}",
+        "{},start=0x{start:x},stop=0x{stop:x},budget={INSTRUCTION_BUDGET},out={},progress={}",
         plugin.display(),
-        score_absolute.display()
+        score_absolute.display(),
+        progress_path.display()
     );
 
     let child = tokio::process::Command::new("qemu-system-riscv64")
@@ -664,9 +815,51 @@ async fn evaluate_binary(binary: &Path, input: &str, label: &str) -> Result<Eval
         .spawn()
         .map_err(|error| format!("Failed to start QEMU: {error}"))?;
 
-    let output = match timeout(HOST_TIMEOUT, child.wait_with_output()).await {
-        Ok(result) => result.map_err(|error| format!("QEMU failed: {error}"))?,
-        Err(_) => return Err("Timeout".to_string()),
+    let mut progress_timer = interval(PROGRESS_POLL_INTERVAL);
+    progress_timer.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    progress_timer.tick().await;
+    let deadline = sleep(HOST_TIMEOUT);
+    tokio::pin!(deadline);
+    let wait = child.wait_with_output();
+    tokio::pin!(wait);
+    let mut progress_attached = false;
+    let mut last_progress = 0;
+    let output = loop {
+        tokio::select! {
+            result = &mut wait => {
+                if observe_progress(
+                    &mut progress_file,
+                    progress,
+                    multi,
+                    &mut progress_attached,
+                    &mut last_progress,
+                )? {
+                    return Err(instruction_budget_error());
+                }
+                break result.map_err(|error| format!("QEMU failed: {error}"))?;
+            }
+            _ = &mut deadline => {
+                let _ = observe_progress(
+                    &mut progress_file,
+                    progress,
+                    multi,
+                    &mut progress_attached,
+                    &mut last_progress,
+                );
+                return Err("Timeout".to_string());
+            }
+            _ = progress_timer.tick() => {
+                if observe_progress(
+                    &mut progress_file,
+                    progress,
+                    multi,
+                    &mut progress_attached,
+                    &mut last_progress,
+                )? {
+                    return Err(instruction_budget_error());
+                }
+            }
+        }
     };
 
     let mailbox = read_mailbox(&ram_path)?;
@@ -691,6 +884,9 @@ async fn evaluate_binary(binary: &Path, input: &str, label: &str) -> Result<Eval
         kind => return Err(format!("Unknown answer kind {kind}")),
     };
     let instructions = read_score(&score_path)?;
+    if instructions > INSTRUCTION_BUDGET {
+        return Err(instruction_budget_error());
+    }
 
     Ok(Evaluation {
         actual,
@@ -934,17 +1130,19 @@ async fn run_solutions_parallel(
         if worker_count == 1 { "" } else { "s" }
     );
 
-    let mut pending = cases.into_iter();
+    let progress = MultiProgress::new();
+    let mut pending = cases
+        .into_iter()
+        .map(|case| (solution_progress_bar(&case.label), case));
     let mut workers = JoinSet::new();
-    for case in pending.by_ref().take(worker_count) {
-        workers.spawn(evaluate_solution(case));
+    for (bar, case) in pending.by_ref().take(worker_count) {
+        workers.spawn(evaluate_solution(case, bar, Some(progress.clone())));
     }
     while let Some(completed) = workers.join_next().await {
         let result = completed.map_err(|error| format!("QEMU worker failed: {error}"))?;
-        print_run_result(&result);
         results.push(result);
-        if let Some(case) = pending.next() {
-            workers.spawn(evaluate_solution(case));
+        if let Some((bar, case)) = pending.next() {
+            workers.spawn(evaluate_solution(case, bar, Some(progress.clone())));
         }
     }
 
@@ -960,6 +1158,7 @@ async fn run_all_solutions(
         passed: 0,
         errors: 0,
         timeouts: 0,
+        budget_exceeded: 0,
         total_instructions: 0,
     };
 
@@ -969,6 +1168,12 @@ async fn run_all_solutions(
             summary.total_instructions += u128::from(result.instructions.unwrap_or(0));
         } else if result.error.as_deref() == Some("Timeout") {
             summary.timeouts += 1;
+        } else if result
+            .error
+            .as_deref()
+            .is_some_and(is_instruction_budget_error)
+        {
+            summary.budget_exceeded += 1;
         } else {
             summary.errors += 1;
         }
