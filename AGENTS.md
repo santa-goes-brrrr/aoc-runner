@@ -98,12 +98,13 @@ The TCG plugin receives ROI addresses extracted from the ELF with `nm` and write
 cargo run -p cli -- db init
 cargo run -p cli -- db reset
 cargo run -p cli -- db list
+cargo run -p cli -- db upsert -y 2025 -d 1 -p 1 -i input.txt -s 123456
 cargo run -p cli -- db read input -y 2025 -d 1 -p 1
 cargo run -p cli -- db read hash -y 2025 -d 1 -p 1
 cargo run -p cli -- db delete -y 2025 -d 1 -p 1
 ```
 
-Short arguments: `-y` year, `-d` day, `-p` part, `-s` expected solution. Upserts store only a domain-separated SHA-256 hash.
+Short arguments: `-y` year, `-d` day, `-p` part, `-i` input file, `-s` expected solution. Upserts store only a domain-separated SHA-256 hash.
 
 ## Code style
 

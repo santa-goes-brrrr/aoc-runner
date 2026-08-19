@@ -87,7 +87,7 @@ enum DbCommands {
     Reset,
     /// List all solutions
     List,
-    /// Insert or update a solution, reading the input from stdin
+    /// Insert or update a solution, reading the input from a file
     Upsert {
         #[arg(short, long)]
         year: u16,
@@ -95,6 +95,8 @@ enum DbCommands {
         day: u8,
         #[arg(short, long)]
         part: u8,
+        #[arg(short, long)]
+        input: PathBuf,
         #[arg(short, long)]
         solution: String,
     },
@@ -262,11 +264,16 @@ async fn run_db_command(
             year,
             day,
             part,
+            input,
             solution,
         } => {
-            let mut input = String::new();
-            io::stdin().read_to_string(&mut input)?;
-            upsert_solution(connection, year, day, part, &input, &solution).await?;
+            let input_contents = fs::read_to_string(&input).map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!("Failed to read input file {}: {error}", input.display()),
+                )
+            })?;
+            upsert_solution(connection, year, day, part, &input_contents, &solution).await?;
             println!("Upserted: year={year}, day={day}, part={part}");
         }
         DbCommands::Delete { year, day, part } => {

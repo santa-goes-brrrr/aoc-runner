@@ -109,11 +109,12 @@ cargo build -p cli --release
 cargo run -p cli -- db init
 cargo run -p cli -- db reset
 cargo run -p cli -- db list
+cargo run -p cli -- db upsert -y 2025 -d 1 -p 1 -i input.txt -s 123456
 cargo run -p cli -- db read input -y 2025 -d 1 -p 1
 cargo run -p cli -- db read hash -y 2025 -d 1 -p 1
 cargo run -p cli -- db delete -y 2025 -d 1 -p 1
 ```
 
-To upsert an entry, pipe its input through stdin and pass the expected answer with `-s`. The CLI stores only a domain-separated SHA-256 hash of the trimmed answer.
+To upsert an entry, pass its input file with `-i` and the expected answer with `-s`. The CLI stores the input text and only a domain-separated SHA-256 hash of the trimmed answer.
 
 A hash prevents directly reading an answer from the database, but small numeric answers may still be found by offline brute force. Puzzle inputs in `aoc.db` remain personal. Do not publish `aoc.db`, input packets, RAM images, or files under `inputs/`.
