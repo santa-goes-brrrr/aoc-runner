@@ -1,7 +1,0 @@
-[package]
-name = "aoc-2025-10-2"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-z3 = { workspace = true }

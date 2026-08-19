@@ -1,0 +1,5 @@
+[target.riscv64gc-unknown-none-elf]
+rustflags = [
+    "-C", "target-feature=+v,+zvl256b",
+    "-C", "link-arg=-Truntime/linker.ld",
+]

@@ -1,0 +1,10 @@
+[package]
+name = "aoc-2025"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+aoc-runtime = { workspace = true }
+hashbrown = { workspace = true }
+petgraph = { workspace = true }

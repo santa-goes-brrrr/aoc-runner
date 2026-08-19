@@ -1,15 +1,32 @@
+use aoc_runtime::{
+    INPUT_ADDRESS, INPUT_CAPACITY, INPUT_HEADER_SIZE, INPUT_MAGIC, OUTPUT_ADDRESS, OUTPUT_MAGIC,
+    OUTPUT_MAILBOX_SIZE, PROTOCOL_VERSION, RAM_BASE, RAM_SIZE, STATE_OK,
+};
 use clap::{Parser, Subcommand};
 use libsql::{Builder, Connection};
-use rayon::prelude::*;
-use std::io::{self, Read, Write};
+use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
+use std::fs::{self, File};
+use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
-use tokio::io::AsyncWriteExt;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+use tokio::task::JoinSet;
 use tokio::time::timeout;
+
+const TARGET: &str = "riscv64gc-unknown-none-elf";
+const HOST_TIMEOUT: Duration = Duration::from_secs(10);
+const GREEN: &str = "\x1b[32m";
+const RED: &str = "\x1b[31m";
+const YELLOW: &str = "\x1b[33m";
+const RESET: &str = "\x1b[0m";
+
+static RUN_ID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Parser)]
 #[command(name = "cli")]
-#[command(about = "Advent of Code CLI")]
+#[command(about = "Build, evaluate, and manage Advent of Code solutions")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -22,22 +39,22 @@ enum Commands {
         #[command(subcommand)]
         command: DbCommands,
     },
-    /// Run and verify solutions
+    /// Run and verify solutions in the RV64GCV evaluator
     Run {
         #[command(subcommand)]
         command: RunCommands,
     },
-    /// Compare performance between current branch and main
+    /// Compare instruction counts between the current branch and main
     Compare {
-        /// Number of runs for timing (default: 10)
-        #[arg(short, long, default_value_t = 10)]
-        runs: u32,
+        /// Maximum number of concurrent QEMU workers
+        #[arg(short, long)]
+        jobs: Option<usize>,
     },
 }
 
 #[derive(Subcommand)]
 enum RunCommands {
-    /// Run a single solution and verify against expected output
+    /// Run a single solution and verify its answer
     One {
         #[arg(short, long)]
         year: u16,
@@ -45,27 +62,24 @@ enum RunCommands {
         day: u8,
         #[arg(short, long)]
         part: u8,
-        /// Number of runs for timing (default: 10)
-        #[arg(short, long, default_value_t = 10)]
-        runs: u32,
     },
-    /// Run all solutions and verify against expected outputs
+    /// Run every solution and verify its answer
     All {
-        /// Number of runs for timing (default: 10)
-        #[arg(short, long, default_value_t = 10)]
-        runs: u32,
+        /// Maximum number of concurrent QEMU workers
+        #[arg(short, long)]
+        jobs: Option<usize>,
     },
 }
 
 #[derive(Subcommand)]
 enum DbCommands {
-    /// Initialize the database (create tables)
+    /// Initialize the database
     Init,
-    /// Reset the database (delete all data)
+    /// Delete the solutions table
     Reset,
     /// List all solutions
     List,
-    /// Insert or update a solution (input read from stdin)
+    /// Insert or update a solution, reading the input from stdin
     Upsert {
         #[arg(short, long)]
         year: u16,
@@ -76,7 +90,7 @@ enum DbCommands {
         #[arg(short, long)]
         solution: String,
     },
-    /// Delete a solution
+    /// Delete an entry
     Delete {
         #[arg(short, long)]
         year: u16,
@@ -94,8 +108,8 @@ enum DbCommands {
 
 #[derive(Subcommand)]
 enum ReadCommands {
-    /// Read the solution/output for a given year, day, part
-    Solution {
+    /// Read the stored answer hash
+    Hash {
         #[arg(short, long)]
         year: u16,
         #[arg(short, long)]
@@ -103,7 +117,6 @@ enum ReadCommands {
         #[arg(short, long)]
         part: u8,
     },
-    /// Read the input for a given year, day, part
     Input {
         #[arg(short, long)]
         year: u16,
@@ -114,482 +127,846 @@ enum ReadCommands {
     },
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cli = Cli::parse();
-
-    let db = Builder::new_local("aoc.db").build().await?;
-    let conn = db.connect()?;
-
-    match cli.command {
-        Commands::Db { command } => match command {
-            DbCommands::Init => {
-                create_schema(&conn).await?;
-                println!("Database initialized");
-            }
-            DbCommands::Reset => {
-                reset_db(&conn).await?;
-                println!("Database reset");
-            }
-            DbCommands::List => {
-                list_solutions(&conn).await?;
-            }
-            DbCommands::Upsert {
-                year,
-                day,
-                part,
-                solution,
-            } => {
-                let mut input = String::new();
-                io::stdin().read_to_string(&mut input)?;
-                upsert_solution(&conn, year, day, part, &input, &solution).await?;
-                println!("Upserted: year={year}, day={day}, part={part}, solution={solution}");
-            }
-            DbCommands::Delete { year, day, part } => {
-                delete_solution(&conn, year, day, part).await?;
-                println!("Deleted: year={year}, day={day}, part={part}");
-            }
-            DbCommands::Read { command } => match command {
-                ReadCommands::Solution { year, day, part } => {
-                    let solution = read_solution(&conn, year, day, part).await?;
-                    print!("{solution}");
-                }
-                ReadCommands::Input { year, day, part } => {
-                    let input = read_input(&conn, year, day, part).await?;
-                    print!("{input}");
-                }
-            },
-        },
-        Commands::Run { command } => match command {
-            RunCommands::One { year, day, part, runs } => {
-                let result = run_solution(&conn, year, day, part, runs).await?;
-                print_run_result(&result);
-                if !result.passed {
-                    std::process::exit(1);
-                }
-            }
-            RunCommands::All { runs } => {
-                let summary = run_all_solutions(&conn, runs).await?;
-                println!(
-                    "\n{GREEN}✓ {} passed{RESET}, {RED}✗ {} errors{RESET}, {YELLOW}⧖ {} timeouts{RESET} ({:.2}ms)",
-                    summary.passed,
-                    summary.errors,
-                    summary.timeouts,
-                    summary.total_time_ms as f64
-                );
-                if summary.errors > 0 || summary.timeouts > 0 {
-                    std::process::exit(1);
-                }
-            }
-        },
-        Commands::Compare { runs } => {
-            compare_branches(&conn, runs).await?;
-        }
-    }
-
-    Ok(())
-}
-
-async fn create_schema(conn: &Connection) -> Result<(), libsql::Error> {
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS solutions (
-            year INTEGER NOT NULL,
-            day INTEGER NOT NULL,
-            part INTEGER NOT NULL,
-            input TEXT NOT NULL,
-            output TEXT NOT NULL,
-            PRIMARY KEY (year, day, part)
-        )",
-        (),
-    )
-    .await?;
-    Ok(())
-}
-
-async fn reset_db(conn: &Connection) -> Result<(), libsql::Error> {
-    conn.execute("DROP TABLE IF EXISTS solutions", ()).await?;
-    Ok(())
-}
-
-async fn upsert_solution(
-    conn: &Connection,
-    year: u16,
-    day: u8,
-    part: u8,
-    input: &str,
-    output: &str,
-) -> Result<(), libsql::Error> {
-    conn.execute(
-        "INSERT OR REPLACE INTO solutions (year, day, part, input, output) VALUES (?, ?, ?, ?, ?)",
-        (year, day, part, input, output),
-    )
-    .await?;
-    Ok(())
-}
-
-async fn read_solution(
-    conn: &Connection,
-    year: u16,
-    day: u8,
-    part: u8,
-) -> Result<String, Box<dyn std::error::Error>> {
-    let mut rows = conn
-        .query(
-            "SELECT output FROM solutions WHERE year = ? AND day = ? AND part = ?",
-            (year, day, part),
-        )
-        .await?;
-    if let Some(row) = rows.next().await? {
-        Ok(row.get::<String>(0)?)
-    } else {
-        Err(format!("No solution found for year={year}, day={day}, part={part}").into())
-    }
-}
-
-async fn read_input(
-    conn: &Connection,
-    year: u16,
-    day: u8,
-    part: u8,
-) -> Result<String, Box<dyn std::error::Error>> {
-    let mut rows = conn
-        .query(
-            "SELECT input FROM solutions WHERE year = ? AND day = ? AND part = ?",
-            (year, day, part),
-        )
-        .await?;
-    if let Some(row) = rows.next().await? {
-        Ok(row.get::<String>(0)?)
-    } else {
-        Err(format!("No input found for year={year}, day={day}, part={part}").into())
-    }
-}
-
-async fn delete_solution(conn: &Connection, year: u16, day: u8, part: u8) -> Result<(), libsql::Error> {
-    conn.execute(
-        "DELETE FROM solutions WHERE year = ? AND day = ? AND part = ?",
-        (year, day, part),
-    )
-    .await?;
-    Ok(())
-}
-
-async fn list_solutions(conn: &Connection) -> Result<(), libsql::Error> {
-    let mut rows = conn
-        .query(
-            "SELECT year, day, part, output FROM solutions ORDER BY year, day, part",
-            (),
-        )
-        .await?;
-    while let Some(row) = rows.next().await? {
-        let year: u16 = row.get::<u32>(0)? as u16;
-        let day: u8 = row.get::<u32>(1)? as u8;
-        let part: u8 = row.get::<u32>(2)? as u8;
-        let output: String = row.get(3)?;
-        println!("{year}\t{day}\t{part}\t{output}");
-    }
-    Ok(())
-}
-
-struct TimingStats {
-    min_ms: f64,
-    max_ms: f64,
-    mean_ms: f64,
-}
-
 struct RunResult {
     year: u16,
     day: u8,
     part: u8,
     passed: bool,
-    expected: String,
     actual: String,
-    timing: Option<TimingStats>,
+    instructions: Option<u64>,
     error: Option<String>,
 }
 
-// ANSI color codes
-const GREEN: &str = "\x1b[32m";
-const RED: &str = "\x1b[31m";
-const YELLOW: &str = "\x1b[33m";
-const RESET: &str = "\x1b[0m";
-
-fn print_run_result(result: &RunResult) {
-    if result.passed {
-        if let Some(ref timing) = result.timing {
-            println!(
-                "{GREEN}✓ {}-{:02}-{} Correct ({:.2}ms ± {:.2}ms){RESET}",
-                result.year, result.day, result.part,
-                timing.mean_ms,
-                (timing.max_ms - timing.min_ms) / 2.0
-            );
-        } else {
-            println!(
-                "{GREEN}✓ {}-{:02}-{} Correct{RESET}",
-                result.year, result.day, result.part
-            );
-        }
-    } else if let Some(ref err) = result.error {
-        let is_timeout = err.contains("Timeout");
-        let color = if is_timeout { YELLOW } else { RED };
-        println!(
-            "{color}✗ {}-{:02}-{} {}{RESET}",
-            result.year, result.day, result.part, err
-        );
-    } else {
-        let time_str = result.timing.as_ref()
-            .map(|t| format!("{:.2}ms", t.mean_ms))
-            .unwrap_or_default();
-        println!(
-            "{RED}✗ {}-{:02}-{} expected '{}', got '{}' ({}){RESET}",
-            result.year,
-            result.day,
-            result.part,
-            result.expected.trim(),
-            result.actual.trim(),
-            time_str
-        );
-    }
-}
-
-async fn run_binary_with_timeout(
-    binary_path: &str,
-    input: &str,
-    timeout_duration: Duration,
-) -> Result<(Duration, std::process::Output), String> {
-    let mut child = tokio::process::Command::new(binary_path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| format!("Failed to spawn: {e}"))?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(input.as_bytes())
-            .await
-            .map_err(|e| format!("Failed to write stdin: {e}"))?;
-    }
-
-    let start = Instant::now();
-    match timeout(timeout_duration, child.wait_with_output()).await {
-        Ok(Ok(output)) => {
-            let duration = start.elapsed();
-            Ok((duration, output))
-        }
-        Ok(Err(e)) => Err(format!("Process error: {e}")),
-        Err(_) => {
-            // Timeout - child will be killed on drop due to kill_on_drop(true)
-            Err("Timeout".to_string())
-        }
-    }
-}
-
-fn run_binary_timed(binary_path: &str, input: &str) -> std::io::Result<Duration> {
-    let mut child = Command::new(binary_path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(input.as_bytes())?;
-    }
-
-    let start = Instant::now();
-    child.wait()?;
-    Ok(start.elapsed())
-}
-
-fn print_progress(msg: &str) {
-    print!("\r\x1b[K{}", msg);
-    std::io::stdout().flush().unwrap();
-}
-
-async fn run_solution(
-    conn: &Connection,
+struct SolutionCase {
     year: u16,
     day: u8,
     part: u8,
-    runs: u32,
-) -> Result<RunResult, Box<dyn std::error::Error>> {
-    let input = read_input(conn, year, day, part).await?;
-    let expected = read_solution(conn, year, day, part).await?;
-    let package_name = format!("aoc-{}-{:02}-{}", year, day, part);
-    let label = format!("{}-{:02}-{}", year, day, part);
+    input: String,
+    expected_hash: String,
+    binary: PathBuf,
+    label: String,
+}
 
-    // Build the solution first
-    print_progress(&format!("{label} Compiling..."));
+struct BuildReport {
+    artifacts: HashSet<String>,
+    errors: HashMap<String, String>,
+    fallback_error: String,
+}
 
-    let build_output = Command::new("cargo")
-        .arg("build")
-        .arg("-p")
-        .arg(&package_name)
-        .arg("--release")
-        .output()?;
-
-    if !build_output.status.success() {
-        print_progress("");
-        return Ok(RunResult {
-            year,
-            day,
-            part,
-            passed: false,
-            expected,
-            actual: String::new(),
-            timing: None,
-            error: Some("Build error".to_string()),
-        });
-    }
-
-    print_progress(&format!("{label} Verifying..."));
-
-    let binary_path = format!("target/release/{}", package_name);
-    let timeout_duration = Duration::from_secs(1);
-
-    // First run to check correctness (with actual timeout enforcement)
-    let first_run = match run_binary_with_timeout(&binary_path, &input, timeout_duration).await {
-        Ok((duration, output)) => (duration, output),
-        Err(e) if e == "Timeout" => {
-            print_progress("");
-            return Ok(RunResult {
-                year,
-                day,
-                part,
-                passed: false,
-                expected,
-                actual: String::new(),
-                timing: None,
-                error: Some("Timeout".to_string()),
-            });
-        }
-        Err(_) => {
-            print_progress("");
-            return Ok(RunResult {
-                year,
-                day,
-                part,
-                passed: false,
-                expected,
-                actual: String::new(),
-                timing: None,
-                error: Some("Runtime error".to_string()),
-            });
-        }
-    };
-
-    if !first_run.1.status.success() {
-        print_progress("");
-        return Ok(RunResult {
-            year,
-            day,
-            part,
-            passed: false,
-            expected,
-            actual: String::new(),
-            timing: None,
-            error: Some("Runtime error".to_string()),
-        });
-    }
-
-    let actual = String::from_utf8_lossy(&first_run.1.stdout).to_string();
-    let passed = actual.trim() == expected.trim();
-
-    if !passed {
-        print_progress("");
-        return Ok(RunResult {
-            year,
-            day,
-            part,
-            passed: false,
-            expected,
-            actual,
-            timing: None,
-            error: None,
-        });
-    }
-
-    // Run multiple times for timing (in parallel with rayon)
-    print_progress(&format!("{label} Benchmarking ({runs} runs)..."));
-
-    let times_ms: Vec<f64> = (0..runs)
-        .into_par_iter()
-        .filter_map(|_| run_binary_timed(&binary_path, &input).ok())
-        .map(|duration| duration.as_secs_f64() * 1000.0)
-        .collect();
-
-    print_progress("");
-
-    if times_ms.is_empty() {
-        return Ok(RunResult {
-            year,
-            day,
-            part,
-            passed: true,
-            expected,
-            actual,
-            timing: None,
-            error: None,
-        });
-    }
-
-    let min_ms = times_ms.iter().cloned().fold(f64::INFINITY, f64::min);
-    let max_ms = times_ms.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let mean_ms = times_ms.iter().sum::<f64>() / times_ms.len() as f64;
-
-    Ok(RunResult {
-        year,
-        day,
-        part,
-        passed: true,
-        expected,
-        actual,
-        timing: Some(TimingStats { min_ms, max_ms, mean_ms }),
-        error: None,
-    })
+struct Evaluation {
+    actual: String,
+    instructions: u64,
 }
 
 struct RunSummary {
     passed: usize,
     errors: usize,
     timeouts: usize,
-    total_time_ms: u128,
+    total_instructions: u128,
 }
 
-async fn run_all_solutions(conn: &Connection, runs: u32) -> Result<RunSummary, Box<dyn std::error::Error>> {
-    let mut rows = conn
+#[derive(Clone)]
+struct BenchmarkResult {
+    year: u16,
+    day: u8,
+    part: u8,
+    instructions: Option<u64>,
+    error: Option<String>,
+}
+
+struct RunDirectory(PathBuf);
+
+impl RunDirectory {
+    fn create(label: &str) -> io::Result<Self> {
+        let id = RUN_ID.fetch_add(1, Ordering::Relaxed);
+        let path = PathBuf::from("target/aoc-evaluator/runs")
+            .join(format!("{label}-{}-{id}", std::process::id()));
+        fs::create_dir_all(&path)?;
+        Ok(Self(path))
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for RunDirectory {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::parse();
+    let database = Builder::new_local("aoc.db").build().await?;
+    let connection = database.connect()?;
+    create_schema(&connection).await?;
+
+    match cli.command {
+        Commands::Db { command } => run_db_command(&connection, command).await?,
+        Commands::Run { command } => match command {
+            RunCommands::One { year, day, part } => {
+                let result = run_solution(&connection, year, day, part).await?;
+                print_run_result(&result);
+                if !result.passed {
+                    std::process::exit(1);
+                }
+            }
+            RunCommands::All { jobs } => {
+                let summary = run_all_solutions(&connection, job_count(jobs)).await?;
+                println!(
+                    "\n{GREEN}✓ {} passed{RESET}, {RED}✗ {} errors{RESET}, {YELLOW}⧖ {} timeouts{RESET} ({} instructions)",
+                    summary.passed, summary.errors, summary.timeouts, summary.total_instructions
+                );
+                if summary.errors > 0 || summary.timeouts > 0 {
+                    std::process::exit(1);
+                }
+            }
+        },
+        Commands::Compare { jobs } => compare_branches(&connection, job_count(jobs)).await?,
+    }
+
+    Ok(())
+}
+
+async fn run_db_command(
+    connection: &Connection,
+    command: DbCommands,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        DbCommands::Init => println!("Database initialized"),
+        DbCommands::Reset => {
+            reset_db(connection).await?;
+            create_schema(connection).await?;
+            println!("Database reset");
+        }
+        DbCommands::List => list_solutions(connection).await?,
+        DbCommands::Upsert {
+            year,
+            day,
+            part,
+            solution,
+        } => {
+            let mut input = String::new();
+            io::stdin().read_to_string(&mut input)?;
+            upsert_solution(connection, year, day, part, &input, &solution).await?;
+            println!("Upserted: year={year}, day={day}, part={part}");
+        }
+        DbCommands::Delete { year, day, part } => {
+            delete_solution(connection, year, day, part).await?;
+            println!("Deleted: year={year}, day={day}, part={part}");
+        }
+        DbCommands::Read { command } => match command {
+            ReadCommands::Hash { year, day, part } => {
+                print!("{}", read_answer_hash(connection, year, day, part).await?);
+            }
+            ReadCommands::Input { year, day, part } => {
+                print!("{}", read_input(connection, year, day, part).await?);
+            }
+        },
+    }
+    Ok(())
+}
+
+async fn create_schema(connection: &Connection) -> Result<(), libsql::Error> {
+    connection
+        .execute(
+            "CREATE TABLE IF NOT EXISTS solutions (
+                year INTEGER NOT NULL,
+                day INTEGER NOT NULL,
+                part INTEGER NOT NULL,
+                input TEXT NOT NULL,
+                answer_hash TEXT NOT NULL,
+                PRIMARY KEY (year, day, part)
+            )",
+            (),
+        )
+        .await?;
+    Ok(())
+}
+
+async fn reset_db(connection: &Connection) -> Result<(), libsql::Error> {
+    connection
+        .execute("DROP TABLE IF EXISTS solutions", ())
+        .await?;
+    Ok(())
+}
+
+async fn upsert_solution(
+    connection: &Connection,
+    year: u16,
+    day: u8,
+    part: u8,
+    input: &str,
+    output: &str,
+) -> Result<(), libsql::Error> {
+    let answer_hash = answer_hash(year, day, part, output);
+    connection
+        .execute(
+            "INSERT OR REPLACE INTO solutions (year, day, part, input, answer_hash)
+             VALUES (?, ?, ?, ?, ?)",
+            (year, day, part, input, answer_hash),
+        )
+        .await?;
+    Ok(())
+}
+
+async fn read_answer_hash(
+    connection: &Connection,
+    year: u16,
+    day: u8,
+    part: u8,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let hash = read_column(connection, year, day, part, "answer_hash").await?;
+    let digest = hash.strip_prefix("sha256:").unwrap_or_default();
+    if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(format!("Invalid answer hash for year={year}, day={day}, part={part}").into());
+    }
+    Ok(hash)
+}
+
+async fn read_input(
+    connection: &Connection,
+    year: u16,
+    day: u8,
+    part: u8,
+) -> Result<String, Box<dyn std::error::Error>> {
+    read_column(connection, year, day, part, "input").await
+}
+
+async fn read_column(
+    connection: &Connection,
+    year: u16,
+    day: u8,
+    part: u8,
+    column: &str,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let query = format!("SELECT {column} FROM solutions WHERE year = ? AND day = ? AND part = ?");
+    let mut rows = connection.query(&query, (year, day, part)).await?;
+    if let Some(row) = rows.next().await? {
+        Ok(row.get::<String>(0)?)
+    } else {
+        Err(format!("No entry found for year={year}, day={day}, part={part}").into())
+    }
+}
+
+async fn delete_solution(
+    connection: &Connection,
+    year: u16,
+    day: u8,
+    part: u8,
+) -> Result<(), libsql::Error> {
+    connection
+        .execute(
+            "DELETE FROM solutions WHERE year = ? AND day = ? AND part = ?",
+            (year, day, part),
+        )
+        .await?;
+    Ok(())
+}
+
+async fn list_solutions(connection: &Connection) -> Result<(), libsql::Error> {
+    let mut rows = connection
+        .query(
+            "SELECT year, day, part, answer_hash FROM solutions ORDER BY year, day, part",
+            (),
+        )
+        .await?;
+    while let Some(row) = rows.next().await? {
+        let year = row.get::<u32>(0)? as u16;
+        let day = row.get::<u32>(1)? as u8;
+        let part = row.get::<u32>(2)? as u8;
+        let answer_hash = row.get::<String>(3)?;
+        println!("{year}\t{day}\t{part}\t{answer_hash}");
+    }
+    Ok(())
+}
+
+fn print_progress(message: &str) {
+    println!("{message}");
+    let _ = io::stdout().flush();
+}
+
+fn print_run_result(result: &RunResult) {
+    let label = format!("{}-{:02}-{}", result.year, result.day, result.part);
+    if result.passed {
+        println!(
+            "{GREEN}✓ {label} Correct ({} instructions){RESET}",
+            result.instructions.unwrap_or(0)
+        );
+    } else if let Some(error) = &result.error {
+        let color = if error == "Timeout" { YELLOW } else { RED };
+        println!("{color}✗ {label} {error}{RESET}");
+    } else {
+        println!(
+            "{RED}✗ {label} Wrong answer '{}' ({} instructions){RESET}",
+            result.actual.trim(),
+            result.instructions.unwrap_or(0)
+        );
+    }
+}
+
+fn job_count(requested: Option<usize>) -> usize {
+    requested
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, usize::from))
+        .max(1)
+}
+
+async fn load_solution_case(
+    connection: &Connection,
+    year: u16,
+    day: u8,
+    part: u8,
+) -> Result<SolutionCase, Box<dyn std::error::Error>> {
+    let binary_name = format!("aoc-{year}-{day:02}-{part}");
+    Ok(SolutionCase {
+        year,
+        day,
+        part,
+        input: read_input(connection, year, day, part).await?,
+        expected_hash: read_answer_hash(connection, year, day, part).await?,
+        binary: PathBuf::from("target")
+            .join(TARGET)
+            .join("release")
+            .join(&binary_name),
+        label: format!("{year}-{day:02}-{part}"),
+    })
+}
+
+fn solution_binary_name(case: &SolutionCase) -> String {
+    format!("aoc-{}-{:02}-{}", case.year, case.day, case.part)
+}
+
+fn build_solution(case: &SolutionCase) -> Result<(), String> {
+    let package = format!("aoc-{}", case.year);
+    let binary_name = solution_binary_name(case);
+    let build = Command::new("cargo")
+        .args([
+            "build",
+            "-p",
+            &package,
+            "--bin",
+            &binary_name,
+            "--release",
+            "--target",
+            TARGET,
+        ])
+        .output()
+        .map_err(|error| format!("Cannot invoke Cargo: {error}"))?;
+    if build.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&build.stderr);
+        Err(format!("Build error: {}", last_nonempty_line(&stderr)))
+    }
+}
+
+fn build_solutions(cases: &[SolutionCase]) -> Result<BuildReport, String> {
+    let mut packages = cases
+        .iter()
+        .map(|case| format!("aoc-{}", case.year))
+        .collect::<Vec<_>>();
+    packages.sort_unstable();
+    packages.dedup();
+
+    let mut binaries = cases.iter().map(solution_binary_name).collect::<Vec<_>>();
+    binaries.sort_unstable();
+    binaries.dedup();
+    let requested = binaries.iter().cloned().collect::<HashSet<_>>();
+    let mut command = Command::new("cargo");
+    command.args([
+        "build",
+        "--release",
+        "--target",
+        TARGET,
+        "--keep-going",
+        "--message-format=json-render-diagnostics",
+    ]);
+    for package in packages {
+        command.arg("-p").arg(package);
+    }
+    for binary in &binaries {
+        command.arg("--bin").arg(binary);
+    }
+
+    let output = command
+        .output()
+        .map_err(|error| format!("Cannot invoke Cargo: {error}"))?;
+    let mut artifacts = HashSet::new();
+    let mut errors = HashMap::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let Ok(message) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(binary) = message
+            .pointer("/target/name")
+            .and_then(|name| name.as_str())
+        else {
+            continue;
+        };
+        if !requested.contains(binary) {
+            continue;
+        }
+        match message.get("reason").and_then(|reason| reason.as_str()) {
+            Some("compiler-artifact")
+                if message
+                    .get("executable")
+                    .is_some_and(|path| !path.is_null()) =>
+            {
+                artifacts.insert(binary.to_string());
+            }
+            Some("compiler-message")
+                if message
+                    .pointer("/message/level")
+                    .and_then(|level| level.as_str())
+                    == Some("error") =>
+            {
+                let detail = message
+                    .pointer("/message/message")
+                    .and_then(|detail| detail.as_str())
+                    .unwrap_or("compilation failed");
+                errors
+                    .entry(binary.to_string())
+                    .or_insert_with(|| format!("Build error: {detail}"));
+            }
+            _ => {}
+        }
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let fallback_error = if output.status.success() {
+        "Build error: Cargo did not produce the executable".to_string()
+    } else {
+        format!("Build error: {}", last_nonempty_line(&stderr))
+    };
+    Ok(BuildReport {
+        artifacts,
+        errors,
+        fallback_error,
+    })
+}
+
+async fn evaluate_solution(case: SolutionCase) -> RunResult {
+    match evaluate_binary(&case.binary, &case.input, &case.label).await {
+        Ok(evaluation) => RunResult {
+            year: case.year,
+            day: case.day,
+            part: case.part,
+            passed: answer_matches(
+                &case.expected_hash,
+                case.year,
+                case.day,
+                case.part,
+                &evaluation.actual,
+            ),
+            actual: evaluation.actual,
+            instructions: Some(evaluation.instructions),
+            error: None,
+        },
+        Err(error) => failed_result(case.year, case.day, case.part, error),
+    }
+}
+
+async fn run_solution(
+    connection: &Connection,
+    year: u16,
+    day: u8,
+    part: u8,
+) -> Result<RunResult, Box<dyn std::error::Error>> {
+    let case = load_solution_case(connection, year, day, part).await?;
+    print_progress(&format!("{} Compiling for {TARGET}...", case.label));
+    if let Err(error) = build_solution(&case) {
+        return Ok(failed_result(year, day, part, error));
+    }
+
+    print_progress(&format!("{} Evaluating in QEMU...", case.label));
+    Ok(evaluate_solution(case).await)
+}
+
+fn failed_result(year: u16, day: u8, part: u8, error: String) -> RunResult {
+    RunResult {
+        year,
+        day,
+        part,
+        passed: false,
+        actual: String::new(),
+        instructions: None,
+        error: Some(error),
+    }
+}
+
+async fn evaluate_binary(binary: &Path, input: &str, label: &str) -> Result<Evaluation, String> {
+    ensure_plugin()?;
+    let run_directory = RunDirectory::create(label).map_err(|error| error.to_string())?;
+    let ram_path = run_directory.path().join("guest.ram");
+    let input_path = run_directory.path().join("input.packet");
+    let _score_path = run_directory.path().join("score.txt");
+
+    File::create(&ram_path)
+        .and_then(|file| file.set_len(RAM_SIZE as u64))
+        .map_err(|error| format!("Cannot create guest RAM: {error}"))?;
+    write_input_packet(&input_path, input.as_bytes())?;
+
+    let start = find_symbol(binary, "__aoc_roi_start")?;
+    let stop = find_symbol(binary, "__aoc_roi_end")?;
+    let plugin = fs::canonicalize("target/aoc-evaluator/roi-counter.so")
+        .map_err(|error| format!("Cannot locate QEMU plugin: {error}"))?;
+    let ram_path = fs::canonicalize(&ram_path).map_err(|error| error.to_string())?;
+    let input_path = fs::canonicalize(&input_path).map_err(|error| error.to_string())?;
+    let score_path = run_directory.path().join("score.txt");
+    let score_absolute = std::env::current_dir()
+        .map_err(|error| error.to_string())?
+        .join(&score_path);
+
+    let object = format!(
+        "memory-backend-file,id=mem,size={RAM_SIZE},mem-path={},share=on",
+        ram_path.display()
+    );
+    let loader = format!(
+        "loader,file={},addr=0x{INPUT_ADDRESS:x},force-raw=on",
+        input_path.display()
+    );
+    let plugin_argument = format!(
+        "{},start=0x{start:x},stop=0x{stop:x},out={}",
+        plugin.display(),
+        score_absolute.display()
+    );
+
+    let child = tokio::process::Command::new("qemu-system-riscv64")
+        .args([
+            "-machine",
+            "virt,memory-backend=mem",
+            "-object",
+            &object,
+            "-m",
+            "256M",
+            "-smp",
+            "1",
+            "-display",
+            "none",
+            "-monitor",
+            "none",
+            "-serial",
+            "none",
+            "-bios",
+            "none",
+            "-cpu",
+            "rv64,v=true,vlen=256,elen=64",
+            "-kernel",
+        ])
+        .arg(binary)
+        .args(["-device", &loader, "-plugin", &plugin_argument])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|error| format!("Failed to start QEMU: {error}"))?;
+
+    let output = match timeout(HOST_TIMEOUT, child.wait_with_output()).await {
+        Ok(result) => result.map_err(|error| format!("QEMU failed: {error}"))?,
+        Err(_) => return Err("Timeout".to_string()),
+    };
+
+    let mailbox = read_mailbox(&ram_path)?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(match mailbox.state {
+            aoc_runtime::STATE_INVALID_INPUT => "Guest rejected the input packet".to_string(),
+            aoc_runtime::STATE_PANIC => "Guest panicked".to_string(),
+            aoc_runtime::STATE_RUNNING => {
+                format!("Guest exited during solve: {}", last_nonempty_line(&stderr))
+            }
+            _ => format!("QEMU error: {}", last_nonempty_line(&stderr)),
+        });
+    }
+    if mailbox.state != STATE_OK {
+        return Err(format!("Guest returned mailbox state {}", mailbox.state));
+    }
+
+    let actual = match mailbox.answer_kind {
+        aoc_runtime::ANSWER_UNSIGNED => mailbox.bits.to_string(),
+        aoc_runtime::ANSWER_SIGNED => (mailbox.bits as i128).to_string(),
+        kind => return Err(format!("Unknown answer kind {kind}")),
+    };
+    let instructions = read_score(&score_path)?;
+
+    Ok(Evaluation {
+        actual,
+        instructions,
+    })
+}
+
+fn ensure_plugin() -> Result<(), String> {
+    let plugin = Path::new("target/aoc-evaluator/roi-counter.so");
+    let source = Path::new("evaluator/roi-counter.c");
+    let stale = match (fs::metadata(plugin), fs::metadata(source)) {
+        (Ok(plugin), Ok(source)) => source.modified().ok() > plugin.modified().ok(),
+        _ => true,
+    };
+    if !stale {
+        return Ok(());
+    }
+
+    let output = Command::new("bash")
+        .arg("evaluator/build-plugin.sh")
+        .output()
+        .map_err(|error| format!("Failed to build QEMU plugin: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Failed to build QEMU plugin: {}",
+            last_nonempty_line(&String::from_utf8_lossy(&output.stderr))
+        ))
+    }
+}
+
+fn write_input_packet(path: &Path, input: &[u8]) -> Result<(), String> {
+    if input.len() > INPUT_CAPACITY - INPUT_HEADER_SIZE {
+        return Err(format!(
+            "Input exceeds {} byte limit",
+            INPUT_CAPACITY - INPUT_HEADER_SIZE
+        ));
+    }
+
+    let mut packet = File::create(path).map_err(|error| error.to_string())?;
+    packet
+        .write_all(&INPUT_MAGIC)
+        .and_then(|_| packet.write_all(&PROTOCOL_VERSION.to_le_bytes()))
+        .and_then(|_| packet.write_all(&0_u32.to_le_bytes()))
+        .and_then(|_| packet.write_all(&(input.len() as u64).to_le_bytes()))
+        .and_then(|_| packet.write_all(input))
+        .map_err(|error| format!("Cannot write input packet: {error}"))
+}
+
+fn find_symbol(binary: &Path, name: &str) -> Result<u64, String> {
+    let output = Command::new("nm")
+        .arg(binary)
+        .output()
+        .map_err(|error| format!("Failed to run nm: {error}"))?;
+    if !output.status.success() {
+        return Err("nm could not read the solution ELF".to_string());
+    }
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| {
+            let mut fields = line.split_whitespace();
+            let address = fields.next()?;
+            let _kind = fields.next()?;
+            (fields.next()? == name).then(|| u64::from_str_radix(address, 16).ok())?
+        })
+        .ok_or_else(|| format!("ELF does not export {name}"))
+}
+
+struct MailboxValue {
+    state: u32,
+    answer_kind: u32,
+    bits: u128,
+}
+
+fn read_mailbox(ram_path: &Path) -> Result<MailboxValue, String> {
+    let mut ram = File::open(ram_path).map_err(|error| error.to_string())?;
+    ram.seek(SeekFrom::Start((OUTPUT_ADDRESS - RAM_BASE) as u64))
+        .map_err(|error| error.to_string())?;
+    let mut bytes = [0_u8; OUTPUT_MAILBOX_SIZE];
+    ram.read_exact(&mut bytes)
+        .map_err(|error| format!("Cannot read output mailbox: {error}"))?;
+
+    if bytes[..8] != OUTPUT_MAGIC || read_u32(&bytes, 8) != PROTOCOL_VERSION {
+        return Err("Guest did not write a valid output mailbox".to_string());
+    }
+
+    let low = read_u64(&bytes, 24) as u128;
+    let high = read_u64(&bytes, 32) as u128;
+    Ok(MailboxValue {
+        state: read_u32(&bytes, 12),
+        answer_kind: read_u32(&bytes, 16),
+        bits: low | (high << 64),
+    })
+}
+
+fn read_u32(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes([
+        bytes[offset],
+        bytes[offset + 1],
+        bytes[offset + 2],
+        bytes[offset + 3],
+    ])
+}
+
+fn read_u64(bytes: &[u8], offset: usize) -> u64 {
+    u64::from_le_bytes([
+        bytes[offset],
+        bytes[offset + 1],
+        bytes[offset + 2],
+        bytes[offset + 3],
+        bytes[offset + 4],
+        bytes[offset + 5],
+        bytes[offset + 6],
+        bytes[offset + 7],
+    ])
+}
+
+fn read_score(path: &Path) -> Result<u64, String> {
+    let score = fs::read_to_string(path)
+        .map_err(|error| format!("Instruction counter produced no score: {error}"))?;
+    let completed = score.lines().any(|line| line == "completed=1");
+    let instructions = score.lines().find_map(|line| {
+        line.strip_prefix("instructions=")
+            .and_then(|value| value.parse().ok())
+    });
+    if !completed {
+        return Err("Instruction counter did not observe the complete ROI".to_string());
+    }
+    instructions.ok_or_else(|| "Instruction counter produced an invalid score".to_string())
+}
+
+fn answer_hash(year: u16, day: u8, part: u8, answer: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"santa-goes-brrrr:answer:v1\0");
+    hasher.update(year.to_le_bytes());
+    hasher.update([day, part]);
+    hasher.update(answer.trim().as_bytes());
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+fn answer_matches(expected_hash: &str, year: u16, day: u8, part: u8, actual: &str) -> bool {
+    expected_hash == answer_hash(year, day, part, actual)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::answer_hash;
+
+    #[test]
+    fn answer_hash_is_canonical_and_domain_separated() {
+        assert_eq!(
+            answer_hash(2025, 1, 1, "42\n"),
+            "sha256:d6518393aaa2c3654a82a7ddc576bfe1abb68a27cde227f8ad2222e7280dd60f"
+        );
+        assert_eq!(
+            answer_hash(2025, 1, 1, " 42 "),
+            answer_hash(2025, 1, 1, "42")
+        );
+        assert_ne!(answer_hash(2025, 1, 1, "42"), answer_hash(2025, 1, 2, "42"));
+    }
+}
+
+fn last_nonempty_line(message: &str) -> &str {
+    message
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("unknown error")
+}
+
+async fn solution_entries(
+    connection: &Connection,
+) -> Result<Vec<(u16, u8, u8)>, Box<dyn std::error::Error>> {
+    let mut rows = connection
         .query(
             "SELECT year, day, part FROM solutions ORDER BY year, day, part",
             (),
         )
         .await?;
-
     let mut entries = Vec::new();
     while let Some(row) = rows.next().await? {
-        let year: u16 = row.get::<u32>(0)? as u16;
-        let day: u8 = row.get::<u32>(1)? as u8;
-        let part: u8 = row.get::<u32>(2)? as u8;
-        entries.push((year, day, part));
+        entries.push((
+            row.get::<u32>(0)? as u16,
+            row.get::<u32>(1)? as u8,
+            row.get::<u32>(2)? as u8,
+        ));
+    }
+    Ok(entries)
+}
+
+async fn run_solutions_parallel(
+    connection: &Connection,
+    jobs: usize,
+) -> Result<Vec<RunResult>, Box<dyn std::error::Error>> {
+    let mut cases = Vec::new();
+    let mut results = Vec::new();
+
+    for (year, day, part) in solution_entries(connection).await? {
+        cases.push(load_solution_case(connection, year, day, part).await?);
+    }
+    if cases.is_empty() {
+        return Ok(results);
     }
 
+    print_progress(&format!(
+        "Compiling {} solutions for {TARGET} with Cargo...",
+        cases.len()
+    ));
+    let report = build_solutions(&cases).unwrap_or_else(|error| BuildReport {
+        artifacts: HashSet::new(),
+        errors: HashMap::new(),
+        fallback_error: error,
+    });
+    cases.retain(|case| {
+        let binary = solution_binary_name(case);
+        if report.artifacts.contains(&binary) {
+            true
+        } else {
+            let error = report
+                .errors
+                .get(&binary)
+                .unwrap_or(&report.fallback_error)
+                .clone();
+            let result = failed_result(case.year, case.day, case.part, error);
+            print_run_result(&result);
+            results.push(result);
+            false
+        }
+    });
+    if cases.is_empty() {
+        return Ok(results);
+    }
+
+    ensure_plugin().map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
+    let worker_count = jobs.min(cases.len());
+    println!(
+        "Evaluating {} solutions with {worker_count} QEMU worker{}...",
+        cases.len(),
+        if worker_count == 1 { "" } else { "s" }
+    );
+
+    let mut pending = cases.into_iter();
+    let mut workers = JoinSet::new();
+    for case in pending.by_ref().take(worker_count) {
+        workers.spawn(evaluate_solution(case));
+    }
+    while let Some(completed) = workers.join_next().await {
+        let result = completed.map_err(|error| format!("QEMU worker failed: {error}"))?;
+        print_run_result(&result);
+        results.push(result);
+        if let Some(case) = pending.next() {
+            workers.spawn(evaluate_solution(case));
+        }
+    }
+
+    results.sort_by_key(|result| (result.year, result.day, result.part));
+    Ok(results)
+}
+
+async fn run_all_solutions(
+    connection: &Connection,
+    jobs: usize,
+) -> Result<RunSummary, Box<dyn std::error::Error>> {
     let mut summary = RunSummary {
         passed: 0,
         errors: 0,
         timeouts: 0,
-        total_time_ms: 0,
+        total_instructions: 0,
     };
 
-    for (year, day, part) in entries {
-        let result = run_solution(conn, year, day, part, runs).await?;
-        print_run_result(&result);
-
-        if let Some(ref timing) = result.timing {
-            summary.total_time_ms += timing.mean_ms as u128;
-        }
-
+    for result in run_solutions_parallel(connection, jobs).await? {
         if result.passed {
             summary.passed += 1;
+            summary.total_instructions += u128::from(result.instructions.unwrap_or(0));
         } else if result.error.as_deref() == Some("Timeout") {
             summary.timeouts += 1;
         } else {
@@ -611,62 +988,41 @@ fn get_current_branch() -> Result<String, Box<dyn std::error::Error>> {
 }
 
 fn checkout_branch(branch: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let output = Command::new("git")
-        .args(["checkout", branch])
-        .output()?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Failed to checkout {branch}: {stderr}").into());
+    let output = Command::new("git").args(["checkout", branch]).output()?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Failed to checkout {branch}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into())
     }
-    Ok(())
-}
-
-#[derive(Clone)]
-struct BenchmarkResult {
-    year: u16,
-    day: u8,
-    part: u8,
-    mean_ms: Option<f64>,
-    error: Option<String>,
 }
 
 async fn collect_benchmark_results(
-    conn: &Connection,
-    runs: u32,
-    branch_name: &str,
+    connection: &Connection,
+    branch: &str,
+    jobs: usize,
 ) -> Result<Vec<BenchmarkResult>, Box<dyn std::error::Error>> {
-    let mut rows = conn
-        .query(
-            "SELECT year, day, part FROM solutions ORDER BY year, day, part",
-            (),
-        )
-        .await?;
-
-    let mut entries = Vec::new();
-    while let Some(row) = rows.next().await? {
-        let year: u16 = row.get::<u32>(0)? as u16;
-        let day: u8 = row.get::<u32>(1)? as u8;
-        let part: u8 = row.get::<u32>(2)? as u8;
-        entries.push((year, day, part));
-    }
-
-    println!("\n{YELLOW}Running benchmarks on '{branch_name}'...{RESET}\n");
-
-    let mut results = Vec::new();
-    for (year, day, part) in entries {
-        let result = run_solution(conn, year, day, part, runs).await?;
-        print_run_result(&result);
-
-        results.push(BenchmarkResult {
-            year,
-            day,
-            part,
-            mean_ms: result.timing.map(|t| t.mean_ms),
-            error: result.error,
-        });
-    }
-
-    Ok(results)
+    println!("\n{YELLOW}Evaluating '{branch}'...{RESET}\n");
+    Ok(run_solutions_parallel(connection, jobs)
+        .await?
+        .into_iter()
+        .map(|result| BenchmarkResult {
+            year: result.year,
+            day: result.day,
+            part: result.part,
+            instructions: if result.passed {
+                result.instructions
+            } else {
+                None
+            },
+            error: result
+                .error
+                .or_else(|| (!result.passed).then(|| "wrong answer".to_string())),
+        })
+        .collect())
 }
 
 fn print_comparison_report(
@@ -674,129 +1030,84 @@ fn print_comparison_report(
     current_results: &[BenchmarkResult],
     main_results: &[BenchmarkResult],
 ) {
-    println!("\n{YELLOW}═══════════════════════════════════════════════════════════════{RESET}");
-    println!("{YELLOW}  Performance Comparison: {current_branch} vs main{RESET}");
-    println!("{YELLOW}═══════════════════════════════════════════════════════════════{RESET}\n");
-
+    println!("\n{YELLOW}Instruction comparison: {current_branch} vs main{RESET}\n");
     println!(
-        "{:<12} {:>12} {:>12} {:>12} {:>10}",
+        "{:<12} {:>14} {:>14} {:>14} {:>10}",
         "Solution", "Branch", "Main", "Diff", "Change"
     );
-    println!("{}", "─".repeat(60));
+    println!("{}", "─".repeat(70));
 
-    let mut total_current = 0.0;
-    let mut total_main = 0.0;
     let mut improvements = 0;
     let mut regressions = 0;
+    let mut log_ratio_sum = 0.0;
+    let mut ratio_count = 0;
 
-    for (current, main) in current_results.iter().zip(main_results.iter()) {
+    for (current, main) in current_results.iter().zip(main_results) {
         let label = format!("{}-{:02}-{}", current.year, current.day, current.part);
-
-        match (current.mean_ms, main.mean_ms) {
-            (Some(curr_ms), Some(main_ms)) => {
-                total_current += curr_ms;
-                total_main += main_ms;
-
-                let diff = curr_ms - main_ms;
-                let pct = if main_ms > 0.0 {
-                    ((curr_ms - main_ms) / main_ms) * 100.0
-                } else {
-                    0.0
-                };
-
-                let (color, symbol) = if diff < -0.1 {
+        match (current.instructions, main.instructions) {
+            (Some(current_count), Some(main_count)) => {
+                let difference = i128::from(current_count) - i128::from(main_count);
+                let percentage = difference as f64 / main_count as f64 * 100.0;
+                log_ratio_sum += (current_count as f64 / main_count as f64).ln();
+                ratio_count += 1;
+                let (color, symbol) = if difference < 0 {
                     improvements += 1;
                     (GREEN, "▼")
-                } else if diff > 0.1 {
+                } else if difference > 0 {
                     regressions += 1;
                     (RED, "▲")
                 } else {
                     (RESET, "≈")
                 };
-
                 println!(
-                    "{:<12} {:>10.2}ms {:>10.2}ms {:>10.2}ms {color}{:>+9.1}% {symbol}{RESET}",
-                    label, curr_ms, main_ms, diff, pct
+                    "{label:<12} {current_count:>14} {main_count:>14} {difference:>+14} {color}{percentage:>+8.1}% {symbol}{RESET}"
                 );
             }
-            (Some(curr_ms), None) => {
-                total_current += curr_ms;
-                println!(
-                    "{:<12} {:>10.2}ms {:>12} {:>12} {:>10}",
-                    label, curr_ms, "N/A", "-", "new"
-                );
-            }
-            (None, Some(main_ms)) => {
-                total_main += main_ms;
-                let error_str = current.error.as_deref().unwrap_or("error");
-                println!(
-                    "{RED}{:<12} {:>12} {:>10.2}ms {:>12} {:>10}{RESET}",
-                    label, error_str, main_ms, "-", "-"
-                );
-            }
-            (None, None) => {
-                let curr_err = current.error.as_deref().unwrap_or("error");
-                let main_err = main.error.as_deref().unwrap_or("error");
-                println!(
-                    "{RED}{:<12} {:>12} {:>12} {:>12} {:>10}{RESET}",
-                    label, curr_err, main_err, "-", "-"
-                );
-            }
+            (Some(count), None) => println!(
+                "{label:<12} {count:>14} {:>14} {:>14} {:>10}",
+                "N/A", "-", "new"
+            ),
+            (None, Some(count)) => println!(
+                "{RED}{label:<12} {:>14} {count:>14} {:>14} {:>10}{RESET}",
+                current.error.as_deref().unwrap_or("error"),
+                "-",
+                "-"
+            ),
+            (None, None) => println!(
+                "{RED}{label:<12} {:>14} {:>14} {:>14} {:>10}{RESET}",
+                current.error.as_deref().unwrap_or("error"),
+                main.error.as_deref().unwrap_or("error"),
+                "-",
+                "-"
+            ),
         }
     }
 
-    println!("{}", "─".repeat(60));
-
-    let total_diff = total_current - total_main;
-    let total_pct = if total_main > 0.0 {
-        ((total_current - total_main) / total_main) * 100.0
-    } else {
-        0.0
-    };
-
-    let (total_color, total_symbol) = if total_diff < -0.1 {
-        (GREEN, "▼")
-    } else if total_diff > 0.1 {
-        (RED, "▲")
-    } else {
-        (RESET, "≈")
-    };
-
-    println!(
-        "{:<12} {:>10.2}ms {:>10.2}ms {:>10.2}ms {total_color}{:>+9.1}% {total_symbol}{RESET}",
-        "Total", total_current, total_main, total_diff, total_pct
-    );
-
-    println!("\n{GREEN}▼ {improvements} faster{RESET}, {RED}▲ {regressions} slower{RESET}");
+    println!("{}", "─".repeat(70));
+    if ratio_count > 0 {
+        let geometric_change = ((log_ratio_sum / ratio_count as f64).exp() - 1.0) * 100.0;
+        println!("Geometric mean change: {geometric_change:+.2}%");
+    }
+    println!("{GREEN}▼ {improvements} improved{RESET}, {RED}▲ {regressions} regressed{RESET}");
 }
 
-async fn compare_branches(conn: &Connection, runs: u32) -> Result<(), Box<dyn std::error::Error>> {
+async fn compare_branches(
+    connection: &Connection,
+    jobs: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
     let current_branch = get_current_branch()?;
-
     if current_branch == "main" {
         println!("Nothing to compare - already on main branch");
         return Ok(());
     }
 
-    // Run benchmarks on current branch
-    let current_results = collect_benchmark_results(conn, runs, &current_branch).await?;
-
-    // Clean build artifacts to ensure fair comparison
-    println!("\n{YELLOW}Cleaning build artifacts...{RESET}");
-    let _ = Command::new("cargo").args(["clean", "--release"]).output();
-
-    // Switch to main and run benchmarks
-    println!("\n{YELLOW}Switching to main branch...{RESET}");
+    let current_results = collect_benchmark_results(connection, &current_branch, jobs).await?;
+    println!("\n{YELLOW}Switching to main...{RESET}");
     checkout_branch("main")?;
-
-    let main_results = collect_benchmark_results(conn, runs, "main").await?;
-
-    // Switch back to original branch
+    let main_results = collect_benchmark_results(connection, "main", jobs).await;
     println!("\n{YELLOW}Switching back to '{current_branch}'...{RESET}");
     checkout_branch(&current_branch)?;
-
-    // Print comparison report
+    let main_results = main_results?;
     print_comparison_report(&current_branch, &current_results, &main_results);
-
     Ok(())
 }

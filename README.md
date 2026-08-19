@@ -1,21 +1,118 @@
 # Santa goes brrrr
 
-Advent of Code solutions optimized for performance, written in Rust.
+Advent of Code solutions optimized for the fewest executed RISC-V instructions.
 
 <p align="center">
   <img src="docs/santa-goes-brrrr.png" alt="Santa Goes Brrrr" width="50%">
 </p>
 
-![Demo](docs/demo.gif)
+Solutions run without an operating system under QEMU on a fixed vector-capable target:
 
-## Quick Start
+- ISA baseline: **RV64GCV**
+- Vector length: **VLEN=256**
+- Maximum element width: **ELEN=64**
+- Guest RAM: 256 MiB
+- Host timeout: 10 seconds
+- Score: architectural instructions retired inside the solver region
+
+An RVV instruction counts as one instruction regardless of active vector length or LMUL. Efficient use of vector instructions is intentionally rewarded.
+
+## Requirements
+
+- Rust stable (1.97.1 used by the current evaluator) with `riscv64gc-unknown-none-elf`, configured by `rust-toolchain.toml`
+- QEMU system emulator with RISC-V and plugin support (developed against QEMU 11.1)
+- `qemu-plugin.h`, a C compiler, `pkg-config`, and GLib development headers
+- `nm` from binutils
+
+The CLI automatically builds `evaluator/roi-counter.c` when its plugin is missing or stale.
+
+## Running solutions
 
 ```bash
-# Run all solutions
-cargo run -p cli -- run all
+# Evaluate one solution and verify its answer
+cargo run -p cli --release -- run one -y 2025 -d 1 -p 1
 
-# Compare performance against main branch
-cargo run -p cli -- compare
+# Evaluate every solution in parallel
+cargo run -p cli --release -- run all
+
+# Limit host concurrency when needed
+cargo run -p cli --release -- run all --jobs 4
+
+# Compare the current branch against main
+cargo run -p cli --release -- compare
 ```
 
-![Performance Comparison](docs/comparison.png)
+`run all` and `compare` compile all requested binaries in one Cargo invocation, allowing Cargo to schedule compilation in parallel, and then run independent QEMU processes concurrently. QEMU defaults to one worker per available host thread; use `--jobs N` to cap it, with each active worker reserving 256 MiB of guest RAM. Cargo uses `--keep-going`, so successfully built solutions are still evaluated when another binary fails to compile, although the overall command reports an error. Progress and results are emitted as append-only log lines without terminal overwrites. The comparison report shows exact instruction-count differences per puzzle and a geometric-mean change across comparable solutions.
+
+## How evaluation works
+
+1. The CLI cross-compiles a solution for `riscv64gc-unknown-none-elf` with RVV enabled.
+2. It creates 256 MiB of file-backed guest RAM.
+3. QEMU loads a versioned input packet at guest address `0x8c000000`.
+4. The bare-metal runtime validates the packet and passes a zero-copy `&str` to the solver.
+5. A QEMU TCG plugin counts instructions between trusted ROI symbols around the solver call.
+6. The runtime writes a materialized integer answer to a mailbox at `0x8d000000` and exits through QEMU's test-finisher device.
+7. The host reads the mailbox, hashes the returned answer, and compares it with the hash in `aoc.db`.
+
+Parsing, allocation, solver logic, and called library code are measured. Boot, input validation, mailbox writes, and shutdown are excluded.
+
+## Writing a solution
+
+Each year is one Cargo package and each puzzle part is an independently compiled binary crate:
+
+```text
+solutions/year=2025/
+├── Cargo.toml
+└── src/bin/
+    ├── aoc-2025-01-1.rs
+    ├── aoc-2025-01-2.rs
+    └── ...
+```
+
+Solutions are `no_std + alloc` bare-metal programs while retaining a generated native `main` for local runs and tests. Name each binary's entry function `solve`; the shared macro selects the correct entry point:
+
+```rust
+#![cfg_attr(target_os = "none", no_std, no_main)]
+
+aoc_runtime::solution!(solve);
+
+fn solve(input: &str) -> u64 {
+    // Parsing and computation are scored.
+    0
+}
+```
+
+Dependencies are declared once in the year's `Cargo.toml`. Build or run a native solution directly with `cargo run -p aoc-2025 --bin aoc-2025-01-1`.
+
+Supported answer types are the Rust signed and unsigned integer primitives through `aoc_runtime::IntoAnswer`. Conversion into the common 128-bit mailbox representation occurs before the ROI ends.
+
+Any pure-Rust crate that compiles with `no_std + alloc` is permitted. Native libraries, FFI dependencies, OS APIs, subprocesses, filesystem access, and networking are not available in the guest. Handwritten RVV assembly is permitted.
+
+## Build and test
+
+```bash
+# Native unit tests
+cargo test --workspace --release
+
+# Cross-compile every bare-metal solution
+cargo build --workspace --exclude cli --release \
+  --target riscv64gc-unknown-none-elf
+
+# Build only the host CLI
+cargo build -p cli --release
+```
+
+## Database commands
+
+```bash
+cargo run -p cli -- db init
+cargo run -p cli -- db reset
+cargo run -p cli -- db list
+cargo run -p cli -- db read input -y 2025 -d 1 -p 1
+cargo run -p cli -- db read hash -y 2025 -d 1 -p 1
+cargo run -p cli -- db delete -y 2025 -d 1 -p 1
+```
+
+To upsert an entry, pipe its input through stdin and pass the expected answer with `-s`. The CLI stores only a domain-separated SHA-256 hash of the trimmed answer.
+
+A hash prevents directly reading an answer from the database, but small numeric answers may still be found by offline brute force. Puzzle inputs in `aoc.db` remain personal. Do not publish `aoc.db`, input packets, RAM images, or files under `inputs/`.

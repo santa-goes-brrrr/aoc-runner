@@ -1,13 +1,14 @@
 [workspace]
 resolver = "2"
-members = ["solutions/*/*/*", "cli"]
+members = ["solutions/year=*", "cli", "runtime"]
 
 [workspace.dependencies]
-ahash = "0.8.12"
-pathfinding = "4.14.0"
-petgraph = { version = "0.8.3", features = ["rayon"] }
-z3 = "0.19.5"
+aoc-runtime = { path = "runtime" }
+hashbrown = "0.16.1"
+petgraph = { version = "0.8.3", default-features = false }
 
 [profile.release]
 opt-level = 3
 lto = true
+codegen-units = 1
+panic = "abort"

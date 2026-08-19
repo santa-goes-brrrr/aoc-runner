@@ -4,149 +4,116 @@ ALWAYS KEEP THIS FILE AND README.md UPDATED
 
 ## Project Overview
 
-Advent of Code solutions repository optimized for performance. Solutions are written in Rust 2024 edition.
+Advent of Code solutions optimized for executed RISC-V instruction count. Rust 2024 solutions are cross-compiled as `no_std + alloc` bare-metal RV64GCV programs and evaluated under QEMU system emulation.
+
+### Fixed evaluator
+
+- Target: `riscv64gc-unknown-none-elf` with `+v,+zvl256b`
+- QEMU CPU: `rv64,v=true,vlen=256,elen=64`
+- Guest RAM: 256 MiB at `0x80000000`
+- Input packet: `0x8c000000`, maximum 16 MiB including header
+- Output mailbox: `0x8d000000`
+- Host execution timeout: 10 seconds
+- One vCPU; no guest OS
+- Score: instructions between `__aoc_roi_start` and `__aoc_roi_end`
+
+Vector instructions count once regardless of VL or LMUL. QEMU cycles are not used.
 
 ### Structure
 
-```
-advent-of-performance/
-├── aoc.db                    # libSQL database with all inputs and solutions
-├── cli/                      # CLI tool for managing the database and running solutions
-├── docs/                     # Documentation assets (demo.gif, demo.cast)
-├── inputs/                   # Backup of input/output files
-├── README.md                 # Project readme
-└── solutions/
-    └── year=YYYY/
-        └── day=DD/
-            └── part=P/
-                ├── Cargo.toml
-                └── src/main.rs
+```text
+├── .cargo/config.toml        # RISC-V target features and linker script
+├── aoc.db                    # libSQL puzzle inputs and answer hashes
+├── cli/                      # Host database and QEMU evaluator CLI
+├── evaluator/                # QEMU TCG instruction-counting plugin
+├── runtime/                  # Shared no_std startup, allocator, ROI, mailbox
+├── solutions/year=YYYY/       # One package per year
+│   ├── Cargo.toml
+│   └── src/bin/aoc-YYYY-DD-P.rs
+├── Cargo.toml
+└── rust-toolchain.toml
 ```
 
-Solutions use Hive-style partitioning: `solutions/year=YYYY/day=DD/part=P/`
+## Solution contract
 
-### Database
+Every solution must:
 
-All puzzle inputs and expected outputs are stored in `aoc.db` (libSQL):
+- compile for `riscv64gc-unknown-none-elf`
+- start with `#![cfg_attr(target_os = "none", no_std, no_main)]`
+- live at `solutions/year=YYYY/src/bin/aoc-YYYY-DD-P.rs`
+- name its entry function `solve` and register it with `aoc_runtime::solution!(solve)`
+- accept the puzzle input as `&str`
+- return an integer type implementing `aoc_runtime::IntoAnswer`
+- perform all answer computation before returning
 
-```sql
-CREATE TABLE solutions (
-    year INTEGER NOT NULL,
-    day INTEGER NOT NULL,
-    part INTEGER NOT NULL,
-    input TEXT NOT NULL,
-    output TEXT NOT NULL,
-    PRIMARY KEY (year, day, part)
-)
-```
+Any Rust crate that supports `no_std + alloc` is allowed and should be declared in the year's shared `Cargo.toml`. Native code, FFI, dynamic linking, OS APIs, filesystem/network access, threads, and subprocesses are forbidden/unavailable. Handwritten RVV is allowed.
 
-## Build and Test Commands
+The measured region includes parsing, allocation, dependencies, and the solver. Runtime startup, input packet validation, answer mailbox writes, and QEMU shutdown are excluded.
+
+## Build and test commands
 
 ```bash
-# Build all solutions
-cargo build --release
+# Run native unit tests
+cargo test --workspace --release
 
-# Run a specific solution
-cargo run -p aoc-2025-01-1 --release
+# Cross-compile all guest solutions
+cargo build --workspace --exclude cli --release \
+  --target riscv64gc-unknown-none-elf
 
-# Build the CLI
-cargo build -p cli
+# Evaluate one solution
+cargo run -p cli --release -- run one -y 2025 -d 1 -p 1
+
+# Evaluate all solutions in parallel (defaults to available host threads)
+cargo run -p cli --release -- run all
+
+# Limit QEMU concurrency when needed
+cargo run -p cli --release -- run all --jobs 4
+
+# Compare current branch with main (also accepts --jobs)
+cargo run -p cli --release -- compare
+
+# Build the host CLI
+cargo build -p cli --release
+
+# Rebuild the QEMU plugin manually
+./evaluator/build-plugin.sh
 ```
 
-### CLI
+Bulk runs compile all requested binaries in one `cargo build --keep-going` invocation so Cargo can schedule compilation in parallel, then evaluate successful artifacts in bounded parallel QEMU workers. A failed binary is reported without preventing successful binaries from running, but the overall command still fails. Each QEMU worker uses one vCPU and 256 MiB of guest RAM; concurrency defaults to available host threads and can be capped with `--jobs`. CLI progress and results use append-only log lines without terminal overwrites. A solution is successful only when QEMU exits within 10 seconds, the guest reports a complete ROI, and the host-computed answer hash matches the database.
 
-The CLI uses libSQL for database access and rayon for parallel benchmarking.
+## Host/guest protocol
 
-```bash
-# Run a solution and verify against expected output (10 benchmark runs by default)
-cargo run -p cli -- run one -y 2025 -d 1 -p 1
+The CLI writes a little-endian input packet containing magic `AOCIN001`, protocol version, flags, input length, and UTF-8 bytes. QEMU's generic loader places it in guest RAM.
 
-# Run with custom number of benchmark iterations
-cargo run -p cli -- run one -y 2025 -d 1 -p 1 -r 20
+The runtime writes output magic `AOCOUT01`, protocol version, state, signed/unsigned answer kind, and a 128-bit answer into file-backed guest RAM. It writes the completed state last, fences memory, then exits via the QEMU `virt` test-finisher. The host reads the mailbox only after QEMU exits. Expected answers are never provided to the guest.
 
-# Run all solutions
-cargo run -p cli -- run all
+The TCG plugin receives ROI addresses extracted from the ELF with `nm` and writes `completed` plus the instruction count to a host-side score file.
 
-# Run all with custom iterations
-cargo run -p cli -- run all -r 5
-
-# Compare performance between current branch and main
-cargo run -p cli -- compare
-
-# Compare with custom iterations
-cargo run -p cli -- compare -r 20
-```
-
-#### Compare Command
-
-The `compare` command benchmarks all solutions on the current branch, then switches to `main`, benchmarks again, and prints a side-by-side comparison report. If already on `main`, it outputs "Nothing to compare".
-
-The report shows:
-- Per-solution timing on both branches
-- Absolute and percentage difference
-- Summary of improvements (▼) and regressions (▲)
-
-#### Database Commands
-
-All database operations are under the `db` subcommand:
+## CLI database commands
 
 ```bash
-# Initialize the database (create tables)
 cargo run -p cli -- db init
-
-# Reset the database (delete all data)
 cargo run -p cli -- db reset
-
-# List all solutions
 cargo run -p cli -- db list
-
-# Get input for a puzzle
 cargo run -p cli -- db read input -y 2025 -d 1 -p 1
-
-# Get expected solution
-cargo run -p cli -- db read solution -y 2025 -d 1 -p 1
-
-# Update a solution (input piped from stdin)
-cargo run -p cli -- db read input -y 2025 -d 1 -p 1 | \
-  cargo run -p cli -- db upsert -y 2025 -d 1 -p 1 -s "answer"
-
-# Delete an entry
+cargo run -p cli -- db read hash -y 2025 -d 1 -p 1
 cargo run -p cli -- db delete -y 2025 -d 1 -p 1
 ```
 
-Short args: `-y` (year), `-d` (day), `-p` (part), `-s` (solution), `-r` (runs)
+Short arguments: `-y` year, `-d` day, `-p` part, `-s` expected solution. Upserts store only a domain-separated SHA-256 hash.
 
-## Code Style Guidelines
+## Code style
 
 - Rust 2024 edition
-- Optimize for performance over readability when needed
-- Use workspace dependencies from root `Cargo.toml` when available: `ahash`, `pathfinding`, `petgraph`, `z3`
-- Release profile uses `opt-level = 3` and `lto = true`
+- Optimize for instruction count and RVV use
+- Keep the compiler, target, linker, allocator, runtime, QEMU model, and plugin deterministic
+- Keep protocol structures versioned and assert/document their layouts
+- Use workspace dependencies when shared
 
-## Testing Instructions
+## Security and privacy
 
-Each solution should produce output matching the expected solution in the database. Solutions have a 1 second timeout. Benchmarking runs solutions multiple times in parallel using rayon.
-
-```bash
-# Run and verify a single solution
-cargo run -p cli -- run one -y 2025 -d 1 -p 1
-
-# Run and verify all solutions
-cargo run -p cli -- run all
-```
-
-Output uses colored indicators:
-- **Green** (✓): Correct solution with timing (mean ± spread)
-- **Yellow** (✗): Timeout (exceeded 1 second)
-- **Red** (✗): Build error, runtime error, or wrong answer
-
-Progress is shown during execution:
-- `{label} Compiling...`
-- `{label} Verifying...`
-- `{label} Benchmarking ({runs} runs)...`
-
-## Security Considerations
-
-- Puzzle inputs in `aoc.db` are personal to the user (from adventofcode.com)
-- Do not commit `aoc.db` or `inputs/` to public repositories
-- The database has no authentication (file-system permissions only)
+- `aoc.db` and puzzle inputs are personal; do not publish them
+- Expected answers are stored only as domain-separated SHA-256 hashes; small numeric answers may still be brute-forced offline
+- Runtime input packets and RAM images live under ignored `target/` paths and are deleted after runs
+- The guest has no semihosting and receives no expected answer
+- The evaluator executes arbitrary guest machine code; use trusted solutions and keep QEMU updated
