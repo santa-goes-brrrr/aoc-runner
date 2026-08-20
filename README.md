@@ -21,9 +21,18 @@ Solutions run without an operating system under QEMU on a fixed vector-capable t
 - Rust stable (1.97.1 used by the current evaluator) with `riscv64gc-unknown-none-elf`, configured by `rust-toolchain.toml`
 - QEMU system emulator with RISC-V and plugin support (developed against QEMU 11.1)
 - `qemu-plugin.h`, CMake, a C compiler, `pkg-config`, and GLib development headers
-- `nm` from binutils
+- `nm` from binutils or Xcode Command Line Tools
 
-The CLI automatically configures and incrementally builds `evaluator/roi-counter.c` with CMake when its plugin is missing or stale.
+On macOS, Homebrew's QEMU package includes both the RISC-V system emulator and
+plugin header; install the host dependencies with:
+
+```bash
+xcode-select --install
+brew install qemu cmake pkgconf glib
+rustup target add riscv64gc-unknown-none-elf
+```
+
+Before any `evaluate` command compiles a solution, the CLI checks Cargo, Rust and the RISC-V target, `qemu-system-riscv64` with plugin support, CMake, a C compiler, `pkg-config`, GLib, `nm`, `qemu-plugin.h`, and a complete plugin build. A failed check lists each missing dependency, an individual fix, platform setup commands, and this requirements section. The successful pre-flight configures and incrementally builds `evaluator/roi-counter.c` with CMake. Its CMake configuration allows QEMU to resolve the plugin API at load time on macOS, as required by Darwin's linker.
 
 ## Agent skill
 

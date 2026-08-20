@@ -205,6 +205,28 @@ struct ProgressSnapshot {
     instructions: u64,
 }
 
+struct PreflightIssue {
+    dependency: &'static str,
+    detail: String,
+    guidance: &'static str,
+}
+
+struct PreflightError(String);
+
+impl std::fmt::Debug for PreflightError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::fmt::Display for PreflightError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for PreflightError {}
+
 struct RunDirectory(PathBuf);
 
 impl RunDirectory {
@@ -230,6 +252,12 @@ impl Drop for RunDirectory {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+    if matches!(&cli.command, Commands::Evaluate { .. }) {
+        print_progress("Checking host evaluator dependencies...");
+        evaluator_preflight()?;
+        print_progress("Host evaluator dependencies are available.");
+    }
+
     let database = Builder::new_local("aoc.db").build().await?;
     let connection = database.connect()?;
     create_schema(&connection).await?;
@@ -835,7 +863,6 @@ async fn evaluate_binary(
     progress: &ProgressBar,
     multi: Option<&MultiProgress>,
 ) -> Result<Evaluation, String> {
-    ensure_plugin()?;
     let run_directory = RunDirectory::create(label).map_err(|error| error.to_string())?;
     let ram_path = run_directory.path().join("guest.ram");
     let input_path = run_directory.path().join("input.packet");
@@ -988,27 +1015,211 @@ async fn evaluate_binary(
     })
 }
 
-fn ensure_plugin() -> Result<(), String> {
-    let plugin = Path::new("target/aoc-evaluator/roi-counter.so");
-    let inputs = [
-        Path::new("evaluator/CMakeLists.txt"),
-        Path::new("evaluator/roi-counter.c"),
-    ];
-    let stale = fs::metadata(plugin)
-        .and_then(|metadata| metadata.modified())
-        .map_or(true, |plugin_modified| {
-            inputs.iter().any(|input| {
-                fs::metadata(input)
-                    .and_then(|metadata| metadata.modified())
-                    .map_or(true, |input_modified| input_modified > plugin_modified)
-            })
-        });
-    if !stale {
-        return Ok(());
+fn command_diagnostics(output: &std::process::Output) -> String {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let lines = stdout
+        .lines()
+        .chain(stderr.lines())
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>();
+    let first = lines.len().saturating_sub(20);
+    if lines.is_empty() {
+        format!("process exited with {}", output.status)
+    } else {
+        lines[first..].join("\n")
+    }
+}
+
+fn probe_tool(
+    issues: &mut Vec<PreflightIssue>,
+    dependency: &'static str,
+    command: &str,
+    arguments: &[&str],
+    guidance: &'static str,
+) -> Option<std::process::Output> {
+    match Command::new(command).args(arguments).output() {
+        Ok(output) if output.status.success() => Some(output),
+        Ok(output) => {
+            issues.push(PreflightIssue {
+                dependency,
+                detail: command_diagnostics(&output),
+                guidance,
+            });
+            None
+        }
+        Err(error) => {
+            issues.push(PreflightIssue {
+                dependency,
+                detail: format!("cannot run `{command}`: {error}"),
+                guidance,
+            });
+            None
+        }
+    }
+}
+
+fn preflight_failure_message(issues: &[PreflightIssue]) -> String {
+    let mut message = "Host evaluator dependency pre-flight failed:\n".to_string();
+    for issue in issues {
+        message.push_str(&format!(
+            "\n- {}: {}\n  Fix: {}\n",
+            issue.dependency, issue.detail, issue.guidance
+        ));
     }
 
+    if cfg!(target_os = "macos") {
+        message.push_str(
+            "\nmacOS setup:\n  xcode-select --install\n  brew install qemu cmake pkgconf glib\n",
+        );
+    } else if cfg!(target_os = "linux") {
+        message.push_str(
+            "\nLinux setup: install your distribution's QEMU RISC-V system emulator with plugin headers, CMake, a C compiler, pkg-config, GLib development headers, and binutils.\n",
+        );
+    }
+    message.push_str(&format!(
+        "  rustup target add {TARGET}\n\nSee README.md#requirements for details."
+    ));
+    message
+}
+
+fn evaluator_preflight() -> Result<(), PreflightError> {
+    let mut issues = Vec::new();
+    let _ = probe_tool(
+        &mut issues,
+        "Cargo",
+        "cargo",
+        &["--version"],
+        "install the Rust toolchain and Cargo with rustup",
+    );
+    let rustc_available = probe_tool(
+        &mut issues,
+        "Rust compiler",
+        "rustc",
+        &["--version"],
+        "install the stable Rust toolchain with rustup",
+    )
+    .is_some();
+
+    if rustc_available {
+        match Command::new("rustc")
+            .args(["--print", "target-libdir", "--target", TARGET])
+            .output()
+        {
+            Ok(output) if output.status.success() => {
+                let path = String::from_utf8_lossy(&output.stdout);
+                if !Path::new(path.trim()).is_dir() {
+                    issues.push(PreflightIssue {
+                        dependency: "Rust RISC-V target",
+                        detail: format!("{TARGET} standard libraries are not installed"),
+                        guidance: "install the target with `rustup target add riscv64gc-unknown-none-elf`",
+                    });
+                }
+            }
+            Ok(output) => issues.push(PreflightIssue {
+                dependency: "Rust RISC-V target",
+                detail: command_diagnostics(&output),
+                guidance: "install the target with `rustup target add riscv64gc-unknown-none-elf`",
+            }),
+            Err(error) => issues.push(PreflightIssue {
+                dependency: "Rust RISC-V target",
+                detail: format!("cannot query rustc: {error}"),
+                guidance: "install the target with `rustup target add riscv64gc-unknown-none-elf`",
+            }),
+        }
+    }
+
+    let qemu = probe_tool(
+        &mut issues,
+        "QEMU RISC-V system emulator",
+        "qemu-system-riscv64",
+        &["-help"],
+        "install QEMU with RISC-V system emulation and plugin support",
+    );
+    let qemu_available = qemu.is_some();
+    if let Some(output) = qemu {
+        let help = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if !help.contains("-plugin") {
+            issues.push(PreflightIssue {
+                dependency: "QEMU plugin support",
+                detail: "`qemu-system-riscv64 -help` does not advertise `-plugin`".to_string(),
+                guidance: "install a QEMU build configured with TCG plugin support",
+            });
+        }
+    }
+
+    let cmake_available = probe_tool(
+        &mut issues,
+        "CMake",
+        "cmake",
+        &["--version"],
+        "install CMake",
+    )
+    .is_some();
+    let compiler_available = probe_tool(
+        &mut issues,
+        "C compiler",
+        "cc",
+        &["--version"],
+        "install Xcode Command Line Tools on macOS or a C build toolchain on Linux",
+    )
+    .is_some();
+    let pkg_config_available = probe_tool(
+        &mut issues,
+        "pkg-config",
+        "pkg-config",
+        &["--version"],
+        "install pkg-config (Homebrew package `pkgconf` on macOS)",
+    )
+    .is_some();
+    let mut glib_available = false;
+    if pkg_config_available {
+        glib_available = probe_tool(
+            &mut issues,
+            "GLib development files",
+            "pkg-config",
+            &["--exists", "glib-2.0"],
+            "install the GLib development package (Homebrew package `glib` on macOS)",
+        )
+        .is_some();
+    }
+    let _ = probe_tool(
+        &mut issues,
+        "nm",
+        "nm",
+        &["--version"],
+        "install binutils or Xcode Command Line Tools",
+    );
+
+    if qemu_available
+        && cmake_available
+        && compiler_available
+        && pkg_config_available
+        && glib_available
+        && let Err(error) = ensure_plugin()
+    {
+        issues.push(PreflightIssue {
+            dependency: "QEMU plugin build",
+            detail: error,
+            guidance: "install qemu-plugin.h and the host build dependencies listed in README.md",
+        });
+    }
+
+    if issues.is_empty() {
+        Ok(())
+    } else {
+        Err(PreflightError(preflight_failure_message(&issues)))
+    }
+}
+
+fn ensure_plugin() -> Result<(), String> {
     let configure = Command::new("cmake")
         .args([
+            "-UQEMU_PLUGIN_INCLUDE_DIR",
             "-S",
             "evaluator",
             "-B",
@@ -1017,12 +1228,11 @@ fn ensure_plugin() -> Result<(), String> {
             "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
         ])
         .output()
-        .map_err(|error| format!("Failed to configure QEMU plugin: {error}"))?;
+        .map_err(|error| format!("failed to configure QEMU plugin: {error}"))?;
     if !configure.status.success() {
-        let stderr = String::from_utf8_lossy(&configure.stderr);
         return Err(format!(
-            "Failed to configure QEMU plugin: {}",
-            last_nonempty_line(&stderr)
+            "failed to configure QEMU plugin:\n{}",
+            command_diagnostics(&configure)
         ));
     }
 
@@ -1036,14 +1246,13 @@ fn ensure_plugin() -> Result<(), String> {
             "roi-counter",
         ])
         .output()
-        .map_err(|error| format!("Failed to build QEMU plugin: {error}"))?;
+        .map_err(|error| format!("failed to build QEMU plugin: {error}"))?;
     if build.status.success() {
         Ok(())
     } else {
-        let stderr = String::from_utf8_lossy(&build.stderr);
         Err(format!(
-            "Failed to build QEMU plugin: {}",
-            last_nonempty_line(&stderr)
+            "failed to build QEMU plugin:\n{}",
+            command_diagnostics(&build)
         ))
     }
 }
@@ -1164,7 +1373,7 @@ fn answer_matches(expected_hash: &str, year: u16, day: u8, part: u8, actual: &st
 
 #[cfg(test)]
 mod tests {
-    use super::answer_hash;
+    use super::{PreflightIssue, answer_hash, preflight_failure_message};
 
     #[test]
     fn answer_hash_is_canonical_and_domain_separated() {
@@ -1177,6 +1386,21 @@ mod tests {
             answer_hash(2025, 1, 1, "42")
         );
         assert_ne!(answer_hash(2025, 1, 1, "42"), answer_hash(2025, 1, 2, "42"));
+    }
+
+    #[test]
+    fn preflight_failure_is_actionable() {
+        let message = preflight_failure_message(&[PreflightIssue {
+            dependency: "QEMU RISC-V system emulator",
+            detail: "cannot run `qemu-system-riscv64`: command not found".to_string(),
+            guidance: "install QEMU with RISC-V system emulation and plugin support",
+        }]);
+
+        assert!(message.contains("Host evaluator dependency pre-flight failed"));
+        assert!(message.contains("qemu-system-riscv64"));
+        assert!(message.contains("Fix: install QEMU"));
+        assert!(message.contains("rustup target add riscv64gc-unknown-none-elf"));
+        assert!(message.contains("README.md#requirements"));
     }
 }
 
@@ -1251,7 +1475,6 @@ async fn run_solutions_parallel(
         return Ok(results);
     }
 
-    ensure_plugin().map_err(|error| -> Box<dyn std::error::Error> { error.into() })?;
     let worker_count = jobs.min(cases.len());
     println!(
         "Evaluating {} solutions with {worker_count} QEMU worker{}...",

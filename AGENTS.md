@@ -82,6 +82,8 @@ cmake -S evaluator -B target/aoc-evaluator \
 cmake --build target/aoc-evaluator --target roi-counter
 ```
 
+Every evaluation starts with a host dependency pre-flight before opening the database or compiling solutions. It checks Cargo, Rust and the RISC-V target, QEMU RISC-V system emulation and plugin support, CMake, a C compiler, `pkg-config`, GLib, `nm`, and a complete QEMU plugin configure/build. Failures aggregate actionable dependency-specific guidance and platform setup commands. A successful pre-flight leaves the CMake plugin build ready for all evaluator workers.
+
 Bulk runs compile all requested binaries in one `cargo build --keep-going` invocation so Cargo can schedule compilation in parallel, then evaluate successful artifacts in bounded parallel QEMU workers. A failed binary is reported without preventing successful binaries from running, but the overall command still fails. Each QEMU worker uses one vCPU and 256 MiB of guest RAM; concurrency defaults to available host threads and can be capped with `--jobs`. Compilation messages are append-only. Interactive instruction progress lazily creates in-place multi-progress bars on the first non-zero update, starting at 100,000 instructions and doubling per bar increment; each final result replaces its bar message. Bars are hidden and results remain line-oriented for redirected output. A solution is successful only when it stays within the 2-billion-instruction budget, QEMU exits within the 10-second watchdog, the guest reports a complete ROI, and the host-computed answer hash matches the database.
 
 ## Host/guest protocol
@@ -90,7 +92,7 @@ The CLI writes a little-endian input packet containing magic `AOCIN001`, protoco
 
 The runtime writes output magic `AOCOUT01`, protocol version, state, signed/unsigned answer kind, and a 128-bit answer into file-backed guest RAM. It writes the completed state last, fences memory, then exits via the QEMU `virt` test-finisher. The host reads the mailbox only after QEMU exits. Expected answers are never provided to the guest.
 
-The TCG plugin receives ROI addresses extracted from the ELF with `nm` and writes `completed` plus the final instruction count to a host-side score file. During execution it updates a 24-byte little-endian shared progress mailbox (`AOCPROG1`, version, state, instruction count) at doubling thresholds and when the instruction budget is exceeded. The host polls this mailbox every 25 ms, updates interactive progress bars in place, and terminates over-budget QEMU workers. The wall-clock watchdog remains a fallback for pre-ROI and infrastructure stalls.
+The TCG plugin receives ROI addresses extracted from the ELF with `nm` and writes `completed` plus the final instruction count to a host-side score file. During execution it updates a 24-byte little-endian shared progress mailbox (`AOCPROG1`, version, state, instruction count) at doubling thresholds and when the instruction budget is exceeded. The host polls this mailbox every 25 ms, updates interactive progress bars in place, and terminates over-budget QEMU workers. The wall-clock watchdog remains a fallback for pre-ROI and infrastructure stalls. On macOS, CMake passes Darwin's `-undefined dynamic_lookup` linker option because QEMU resolves the plugin API when loading the module; Homebrew's QEMU package supplies `qemu-system-riscv64` and `qemu-plugin.h`.
 
 ## CLI solution database commands
 

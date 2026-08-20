@@ -16,6 +16,12 @@ target_include_directories(roi-counter PRIVATE "${QEMU_PLUGIN_INCLUDE_DIR}")
 target_link_libraries(roi-counter PRIVATE PkgConfig::GLIB)
 target_compile_options(roi-counter PRIVATE -Wall -Wextra -Werror)
 
+# QEMU resolves the plugin API when it loads the module. ELF linkers permit
+# those unresolved symbols by default, while Darwin's linker needs this flag.
+if(APPLE)
+    target_link_options(roi-counter PRIVATE "LINKER:-undefined,dynamic_lookup")
+endif()
+
 set_target_properties(
     roi-counter
     PROPERTIES

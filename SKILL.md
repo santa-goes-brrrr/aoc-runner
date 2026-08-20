@@ -1,7 +1,7 @@
 ---
 name: santa-goes-brrrr
 description: Operate the santa-goes-brrrr CLI to create, inspect, update, and delete Advent of Code solution records, and to evaluate one or all solutions by executed RV64GCV instruction count. Use when asked to run the evaluator or manage its puzzle inputs and expected-answer hashes. Do not use this skill to develop or modify the CLI itself.
-compatibility: Run from the santa-goes-brrrr repository root on Linux with Rust, QEMU, CMake, pkg-config, GLib headers, qemu-plugin.h, and nm installed.
+compatibility: Run from the santa-goes-brrrr repository root on Linux or macOS with Rust, QEMU, CMake, pkg-config, GLib headers, qemu-plugin.h, and nm installed.
 ---
 
 # Use the santa-goes-brrrr CLI
@@ -119,7 +119,7 @@ Limit parallel QEMU workers when host memory is constrained. Each worker reserve
 cargo run --package cli --release -- evaluate all --jobs 4
 ```
 
-The CLI builds the required RISC-V binaries and QEMU plugin automatically. Do not run separate Cargo, CMake, or QEMU commands first.
+The CLI first checks all host evaluator dependencies and reports installation guidance for anything missing. It then builds the required RISC-V binaries and QEMU plugin automatically. Do not run separate Cargo, CMake, or QEMU commands first.
 
 ## Interpret results
 
