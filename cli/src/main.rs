@@ -42,26 +42,20 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Database operations (init, reset, list, upsert, delete, read)
-    Db {
+    /// Manage solution inputs and expected-answer hashes
+    Solution {
         #[command(subcommand)]
-        command: DbCommands,
+        command: SolutionCommands,
     },
-    /// Run and verify solutions in the RV64GCV evaluator
-    Run {
+    /// Build and evaluate solutions in the RV64GCV evaluator
+    Evaluate {
         #[command(subcommand)]
-        command: RunCommands,
-    },
-    /// Compare instruction counts between the current branch and main
-    Compare {
-        /// Maximum number of concurrent QEMU workers
-        #[arg(short, long)]
-        jobs: Option<usize>,
+        command: EvaluateCommands,
     },
 }
 
 #[derive(Subcommand)]
-enum RunCommands {
+enum EvaluateCommands {
     /// Run a single solution and verify its answer
     One {
         #[arg(short, long)]
@@ -80,15 +74,15 @@ enum RunCommands {
 }
 
 #[derive(Subcommand)]
-enum DbCommands {
+enum SolutionCommands {
     /// Initialize the database
     Init,
     /// Delete the solutions table
     Reset,
     /// List all solutions
     List,
-    /// Insert or update a solution, reading the input from a file
-    Upsert {
+    /// Create a solution entry
+    Create {
         #[arg(short, long)]
         year: u16,
         #[arg(short, long)]
@@ -99,6 +93,11 @@ enum DbCommands {
         input: PathBuf,
         #[arg(short, long)]
         solution: String,
+    },
+    /// Update an existing solution entry
+    Update {
+        #[command(subcommand)]
+        command: UpdateCommands,
     },
     /// Delete an entry
     Delete {
@@ -113,6 +112,32 @@ enum DbCommands {
     Read {
         #[command(subcommand)]
         command: ReadCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum UpdateCommands {
+    /// Replace the stored puzzle input from a file
+    Input {
+        #[arg(short, long)]
+        year: u16,
+        #[arg(short, long)]
+        day: u8,
+        #[arg(short, long)]
+        part: u8,
+        #[arg(short, long)]
+        input: PathBuf,
+    },
+    /// Replace the stored expected-answer hash
+    Hash {
+        #[arg(short, long)]
+        year: u16,
+        #[arg(short, long)]
+        day: u8,
+        #[arg(short, long)]
+        part: u8,
+        #[arg(short, long)]
+        solution: String,
     },
 }
 
@@ -180,15 +205,6 @@ struct ProgressSnapshot {
     instructions: u64,
 }
 
-#[derive(Clone)]
-struct BenchmarkResult {
-    year: u16,
-    day: u8,
-    part: u8,
-    instructions: Option<u64>,
-    error: Option<String>,
-}
-
 struct RunDirectory(PathBuf);
 
 impl RunDirectory {
@@ -219,15 +235,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     create_schema(&connection).await?;
 
     match cli.command {
-        Commands::Db { command } => run_db_command(&connection, command).await?,
-        Commands::Run { command } => match command {
-            RunCommands::One { year, day, part } => {
+        Commands::Solution { command } => run_solution_command(&connection, command).await?,
+        Commands::Evaluate { command } => match command {
+            EvaluateCommands::One { year, day, part } => {
                 let result = run_solution(&connection, year, day, part).await?;
                 if !result.passed {
                     std::process::exit(1);
                 }
             }
-            RunCommands::All { jobs } => {
+            EvaluateCommands::All { jobs } => {
                 let summary = run_all_solutions(&connection, job_count(jobs)).await?;
                 println!(
                     "\nRun completed in {} instructions\n{} passed, {} errors, {} timeouts, {} over budget",
@@ -242,45 +258,74 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         },
-        Commands::Compare { jobs } => compare_branches(&connection, job_count(jobs)).await?,
     }
 
     Ok(())
 }
 
-async fn run_db_command(
+async fn run_solution_command(
     connection: &Connection,
-    command: DbCommands,
+    command: SolutionCommands,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match command {
-        DbCommands::Init => println!("Database initialized"),
-        DbCommands::Reset => {
+        SolutionCommands::Init => println!("Database initialized"),
+        SolutionCommands::Reset => {
             reset_db(connection).await?;
             create_schema(connection).await?;
             println!("Database reset");
         }
-        DbCommands::List => list_solutions(connection).await?,
-        DbCommands::Upsert {
+        SolutionCommands::List => list_solutions(connection).await?,
+        SolutionCommands::Create {
             year,
             day,
             part,
             input,
             solution,
         } => {
-            let input_contents = fs::read_to_string(&input).map_err(|error| {
-                io::Error::new(
-                    error.kind(),
-                    format!("Failed to read input file {}: {error}", input.display()),
-                )
-            })?;
-            upsert_solution(connection, year, day, part, &input_contents, &solution).await?;
-            println!("Upserted: year={year}, day={day}, part={part}");
+            let input_contents = read_input_file(&input)?;
+            if !create_solution(connection, year, day, part, &input_contents, &solution).await? {
+                return Err(
+                    format!("Entry already exists: year={year}, day={day}, part={part}").into(),
+                );
+            }
+            println!("Created: year={year}, day={day}, part={part}");
         }
-        DbCommands::Delete { year, day, part } => {
+        SolutionCommands::Update { command } => match command {
+            UpdateCommands::Input {
+                year,
+                day,
+                part,
+                input,
+            } => {
+                let input_contents = read_input_file(&input)?;
+                if !update_input(connection, year, day, part, &input_contents).await? {
+                    return Err(format!(
+                        "Entry does not exist: year={year}, day={day}, part={part}"
+                    )
+                    .into());
+                }
+                println!("Updated input: year={year}, day={day}, part={part}");
+            }
+            UpdateCommands::Hash {
+                year,
+                day,
+                part,
+                solution,
+            } => {
+                if !update_answer_hash(connection, year, day, part, &solution).await? {
+                    return Err(format!(
+                        "Entry does not exist: year={year}, day={day}, part={part}"
+                    )
+                    .into());
+                }
+                println!("Updated hash: year={year}, day={day}, part={part}");
+            }
+        },
+        SolutionCommands::Delete { year, day, part } => {
             delete_solution(connection, year, day, part).await?;
             println!("Deleted: year={year}, day={day}, part={part}");
         }
-        DbCommands::Read { command } => match command {
+        SolutionCommands::Read { command } => match command {
             ReadCommands::Hash { year, day, part } => {
                 print!("{}", read_answer_hash(connection, year, day, part).await?);
             }
@@ -316,23 +361,65 @@ async fn reset_db(connection: &Connection) -> Result<(), libsql::Error> {
     Ok(())
 }
 
-async fn upsert_solution(
+fn read_input_file(path: &Path) -> io::Result<String> {
+    fs::read_to_string(path).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("Failed to read input file {}: {error}", path.display()),
+        )
+    })
+}
+
+async fn create_solution(
     connection: &Connection,
     year: u16,
     day: u8,
     part: u8,
     input: &str,
-    output: &str,
-) -> Result<(), libsql::Error> {
-    let answer_hash = answer_hash(year, day, part, output);
-    connection
+    solution: &str,
+) -> Result<bool, libsql::Error> {
+    let answer_hash = answer_hash(year, day, part, solution);
+    let changed = connection
         .execute(
-            "INSERT OR REPLACE INTO solutions (year, day, part, input, answer_hash)
+            "INSERT OR IGNORE INTO solutions (year, day, part, input, answer_hash)
              VALUES (?, ?, ?, ?, ?)",
             (year, day, part, input, answer_hash),
         )
         .await?;
-    Ok(())
+    Ok(changed == 1)
+}
+
+async fn update_input(
+    connection: &Connection,
+    year: u16,
+    day: u8,
+    part: u8,
+    input: &str,
+) -> Result<bool, libsql::Error> {
+    let changed = connection
+        .execute(
+            "UPDATE solutions SET input = ? WHERE year = ? AND day = ? AND part = ?",
+            (input, year, day, part),
+        )
+        .await?;
+    Ok(changed == 1)
+}
+
+async fn update_answer_hash(
+    connection: &Connection,
+    year: u16,
+    day: u8,
+    part: u8,
+    solution: &str,
+) -> Result<bool, libsql::Error> {
+    let answer_hash = answer_hash(year, day, part, solution);
+    let changed = connection
+        .execute(
+            "UPDATE solutions SET answer_hash = ? WHERE year = ? AND day = ? AND part = ?",
+            (answer_hash, year, day, part),
+        )
+        .await?;
+    Ok(changed == 1)
 }
 
 async fn read_answer_hash(
@@ -1222,139 +1309,4 @@ async fn run_all_solutions(
     }
 
     Ok(summary)
-}
-
-fn get_current_branch() -> Result<String, Box<dyn std::error::Error>> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .output()?;
-    if !output.status.success() {
-        return Err("Failed to get current branch".into());
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
-}
-
-fn checkout_branch(branch: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let output = Command::new("git").args(["checkout", branch]).output()?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "Failed to checkout {branch}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        )
-        .into())
-    }
-}
-
-async fn collect_benchmark_results(
-    connection: &Connection,
-    branch: &str,
-    jobs: usize,
-) -> Result<Vec<BenchmarkResult>, Box<dyn std::error::Error>> {
-    println!("\n{YELLOW}Evaluating '{branch}'...{RESET}\n");
-    Ok(run_solutions_parallel(connection, jobs)
-        .await?
-        .into_iter()
-        .map(|result| BenchmarkResult {
-            year: result.year,
-            day: result.day,
-            part: result.part,
-            instructions: if result.passed {
-                result.instructions
-            } else {
-                None
-            },
-            error: result
-                .error
-                .or_else(|| (!result.passed).then(|| "wrong answer".to_string())),
-        })
-        .collect())
-}
-
-fn print_comparison_report(
-    current_branch: &str,
-    current_results: &[BenchmarkResult],
-    main_results: &[BenchmarkResult],
-) {
-    println!("\n{YELLOW}Instruction comparison: {current_branch} vs main{RESET}\n");
-    println!(
-        "{:<12} {:>14} {:>14} {:>14} {:>10}",
-        "Solution", "Branch", "Main", "Diff", "Change"
-    );
-    println!("{}", "─".repeat(70));
-
-    let mut improvements = 0;
-    let mut regressions = 0;
-    let mut log_ratio_sum = 0.0;
-    let mut ratio_count = 0;
-
-    for (current, main) in current_results.iter().zip(main_results) {
-        let label = format!("{}-{:02}-{}", current.year, current.day, current.part);
-        match (current.instructions, main.instructions) {
-            (Some(current_count), Some(main_count)) => {
-                let difference = i128::from(current_count) - i128::from(main_count);
-                let percentage = difference as f64 / main_count as f64 * 100.0;
-                log_ratio_sum += (current_count as f64 / main_count as f64).ln();
-                ratio_count += 1;
-                let (color, symbol) = if difference < 0 {
-                    improvements += 1;
-                    (GREEN, "▼")
-                } else if difference > 0 {
-                    regressions += 1;
-                    (RED, "▲")
-                } else {
-                    (RESET, "≈")
-                };
-                println!(
-                    "{label:<12} {current_count:>14} {main_count:>14} {difference:>+14} {color}{percentage:>+8.1}% {symbol}{RESET}"
-                );
-            }
-            (Some(count), None) => println!(
-                "{label:<12} {count:>14} {:>14} {:>14} {:>10}",
-                "N/A", "-", "new"
-            ),
-            (None, Some(count)) => println!(
-                "{RED}{label:<12} {:>14} {count:>14} {:>14} {:>10}{RESET}",
-                current.error.as_deref().unwrap_or("error"),
-                "-",
-                "-"
-            ),
-            (None, None) => println!(
-                "{RED}{label:<12} {:>14} {:>14} {:>14} {:>10}{RESET}",
-                current.error.as_deref().unwrap_or("error"),
-                main.error.as_deref().unwrap_or("error"),
-                "-",
-                "-"
-            ),
-        }
-    }
-
-    println!("{}", "─".repeat(70));
-    if ratio_count > 0 {
-        let geometric_change = ((log_ratio_sum / ratio_count as f64).exp() - 1.0) * 100.0;
-        println!("Geometric mean change: {geometric_change:+.2}%");
-    }
-    println!("{GREEN}▼ {improvements} improved{RESET}, {RED}▲ {regressions} regressed{RESET}");
-}
-
-async fn compare_branches(
-    connection: &Connection,
-    jobs: usize,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let current_branch = get_current_branch()?;
-    if current_branch == "main" {
-        println!("Nothing to compare - already on main branch");
-        return Ok(());
-    }
-
-    let current_results = collect_benchmark_results(connection, &current_branch, jobs).await?;
-    println!("\n{YELLOW}Switching to main...{RESET}");
-    checkout_branch("main")?;
-    let main_results = collect_benchmark_results(connection, "main", jobs).await;
-    println!("\n{YELLOW}Switching back to '{current_branch}'...{RESET}");
-    checkout_branch(&current_branch)?;
-    let main_results = main_results?;
-    print_comparison_report(&current_branch, &current_results, &main_results);
-    Ok(())
 }

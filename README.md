@@ -27,23 +27,20 @@ An RVV instruction counts as one instruction regardless of active vector length 
 
 The CLI automatically configures and incrementally builds `evaluator/roi-counter.c` with CMake when its plugin is missing or stale. CMake also generates `target/aoc-evaluator/compile_commands.json` for `clangd`.
 
-## Running solutions
+## Evaluating solutions
 
 ```bash
 # Evaluate one solution and verify its answer
-cargo run -p cli --release -- run one -y 2025 -d 1 -p 1
+cargo run --package cli --release -- evaluate one --year 2025 --day 1 --part 1
 
 # Evaluate every solution in parallel
-cargo run -p cli --release -- run all
+cargo run --package cli --release -- evaluate all
 
 # Limit host concurrency when needed
-cargo run -p cli --release -- run all --jobs 4
-
-# Compare the current branch against main
-cargo run -p cli --release -- compare
+cargo run --package cli --release -- evaluate all --jobs 4
 ```
 
-`run all` and `compare` compile all requested binaries in one Cargo invocation, allowing Cargo to schedule compilation in parallel, and then run independent QEMU processes concurrently. QEMU defaults to one worker per available host thread; use `--jobs N` to cap it, with each active worker reserving 256 MiB of guest RAM. Cargo uses `--keep-going`, so successfully built solutions are still evaluated when another binary fails to compile, although the overall command reports an error. Compilation messages remain append-only. On an interactive terminal, each active solution gets a logarithmic progress bar on its first non-zero update; it updates in place at 100,000, 200,000, 400,000, and subsequent doubling thresholds, and its final result replaces the bar message instead of adding another line. Progress bars are hidden and results remain line-oriented when output is redirected. The comparison report shows exact instruction-count differences per puzzle and a geometric-mean change across comparable solutions.
+`evaluate all` compiles all requested binaries in one Cargo invocation, allowing Cargo to schedule compilation in parallel, and then runs independent QEMU processes concurrently. QEMU defaults to one worker per available host thread; use `--jobs N` to cap it, with each active worker reserving 256 MiB of guest RAM. Cargo uses `--keep-going`, so successfully built solutions are still evaluated when another binary fails to compile, although the overall command reports an error. Compilation messages remain append-only. On an interactive terminal, each active solution gets a logarithmic progress bar on its first non-zero update; it updates in place at 100,000, 200,000, 400,000, and subsequent doubling thresholds, and its final result replaces the bar message instead of adding another line. Progress bars are hidden and results remain line-oriented when output is redirected.
 
 ## How evaluation works
 
@@ -83,7 +80,7 @@ fn solve(input: &str) -> u64 {
 }
 ```
 
-Dependencies are declared once in the year's `Cargo.toml`. Build or run a native solution directly with `cargo run -p aoc-2025 --bin aoc-2025-01-1`.
+Dependencies are declared once in the year's `Cargo.toml`. Build or run a native solution directly with `cargo run --package aoc-2025 --bin aoc-2025-01-1`.
 
 Supported answer types are the Rust signed and unsigned integer primitives through `aoc_runtime::IntoAnswer`. Conversion into the common 128-bit mailbox representation occurs before the ROI ends.
 
@@ -100,21 +97,23 @@ cargo build --workspace --exclude cli --release \
   --target riscv64gc-unknown-none-elf
 
 # Build only the host CLI
-cargo build -p cli --release
+cargo build --package cli --release
 ```
 
-## Database commands
+## Solution database commands
 
 ```bash
-cargo run -p cli -- db init
-cargo run -p cli -- db reset
-cargo run -p cli -- db list
-cargo run -p cli -- db upsert -y 2025 -d 1 -p 1 -i input.txt -s 123456
-cargo run -p cli -- db read input -y 2025 -d 1 -p 1
-cargo run -p cli -- db read hash -y 2025 -d 1 -p 1
-cargo run -p cli -- db delete -y 2025 -d 1 -p 1
+cargo run --package cli -- solution init
+cargo run --package cli -- solution reset
+cargo run --package cli -- solution list
+cargo run --package cli -- solution create --year 2025 --day 1 --part 1 --input input.txt --solution 123456
+cargo run --package cli -- solution update input --year 2025 --day 1 --part 1 --input replacement.txt
+cargo run --package cli -- solution update hash --year 2025 --day 1 --part 1 --solution 654321
+cargo run --package cli -- solution read input --year 2025 --day 1 --part 1
+cargo run --package cli -- solution read hash --year 2025 --day 1 --part 1
+cargo run --package cli -- solution delete --year 2025 --day 1 --part 1
 ```
 
-To upsert an entry, pass its input file with `-i` and the expected answer with `-s`. The CLI stores the input text and only a domain-separated SHA-256 hash of the trimmed answer.
+`solution create` stores the input text and a domain-separated SHA-256 hash of the trimmed expected answer. The update commands replace one field of an existing entry and fail if that entry does not exist.
 
 A hash prevents directly reading an answer from the database, but small numeric answers may still be found by offline brute force. Puzzle inputs in `aoc.db` remain personal. Do not publish `aoc.db`, input packets, RAM images, or files under `inputs/`.

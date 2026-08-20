@@ -62,19 +62,16 @@ cargo build --workspace --exclude cli --release \
   --target riscv64gc-unknown-none-elf
 
 # Evaluate one solution
-cargo run -p cli --release -- run one -y 2025 -d 1 -p 1
+cargo run --package cli --release -- evaluate one --year 2025 --day 1 --part 1
 
 # Evaluate all solutions in parallel (defaults to available host threads)
-cargo run -p cli --release -- run all
+cargo run --package cli --release -- evaluate all
 
 # Limit QEMU concurrency when needed
-cargo run -p cli --release -- run all --jobs 4
-
-# Compare current branch with main (also accepts --jobs)
-cargo run -p cli --release -- compare
+cargo run --package cli --release -- evaluate all --jobs 4
 
 # Build the host CLI
-cargo build -p cli --release
+cargo build --package cli --release
 
 # Reconfigure and rebuild the QEMU plugin manually
 cmake -S evaluator -B target/aoc-evaluator \
@@ -92,19 +89,21 @@ The runtime writes output magic `AOCOUT01`, protocol version, state, signed/unsi
 
 The TCG plugin receives ROI addresses extracted from the ELF with `nm` and writes `completed` plus the final instruction count to a host-side score file. During execution it updates a 24-byte little-endian shared progress mailbox (`AOCPROG1`, version, state, instruction count) at doubling thresholds and when the instruction budget is exceeded. The host polls this mailbox every 25 ms, updates interactive progress bars in place, and terminates over-budget QEMU workers. The wall-clock watchdog remains a fallback for pre-ROI and infrastructure stalls.
 
-## CLI database commands
+## CLI solution database commands
 
 ```bash
-cargo run -p cli -- db init
-cargo run -p cli -- db reset
-cargo run -p cli -- db list
-cargo run -p cli -- db upsert -y 2025 -d 1 -p 1 -i input.txt -s 123456
-cargo run -p cli -- db read input -y 2025 -d 1 -p 1
-cargo run -p cli -- db read hash -y 2025 -d 1 -p 1
-cargo run -p cli -- db delete -y 2025 -d 1 -p 1
+cargo run --package cli -- solution init
+cargo run --package cli -- solution reset
+cargo run --package cli -- solution list
+cargo run --package cli -- solution create --year 2025 --day 1 --part 1 --input input.txt --solution 123456
+cargo run --package cli -- solution update input --year 2025 --day 1 --part 1 --input replacement.txt
+cargo run --package cli -- solution update hash --year 2025 --day 1 --part 1 --solution 654321
+cargo run --package cli -- solution read input --year 2025 --day 1 --part 1
+cargo run --package cli -- solution read hash --year 2025 --day 1 --part 1
+cargo run --package cli -- solution delete --year 2025 --day 1 --part 1
 ```
 
-Short arguments: `-y` year, `-d` day, `-p` part, `-i` input file, `-s` expected solution. Upserts store only a domain-separated SHA-256 hash.
+Options: `--year`, `--day`, `--part`, `--input`, and `--solution`. Creation stores a domain-separated SHA-256 answer hash; updates fail if the entry does not exist.
 
 ## Code style
 
