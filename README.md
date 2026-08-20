@@ -3,7 +3,7 @@
 Advent of Code solutions optimized for the fewest executed RISC-V instructions.
 
 <p align="center">
-  <img src="docs/santa-goes-brrrr.png" alt="Santa Goes Brrrr" width="50%">
+  <img src="santa-goes-brrrr.png" alt="Santa Goes Brrrr" width="50%">
 </p>
 
 Solutions run without an operating system under QEMU on a fixed vector-capable target:
@@ -16,8 +16,6 @@ Solutions run without an operating system under QEMU on a fixed vector-capable t
 - Host watchdog timeout: 10 seconds
 - Score: architectural instructions retired inside the solver region
 
-An RVV instruction counts as one instruction regardless of active vector length or LMUL. Efficient use of vector instructions is intentionally rewarded.
-
 ## Requirements
 
 - Rust stable (1.97.1 used by the current evaluator) with `riscv64gc-unknown-none-elf`, configured by `rust-toolchain.toml`
@@ -25,7 +23,11 @@ An RVV instruction counts as one instruction regardless of active vector length 
 - `qemu-plugin.h`, CMake, a C compiler, `pkg-config`, and GLib development headers
 - `nm` from binutils
 
-The CLI automatically configures and incrementally builds `evaluator/roi-counter.c` with CMake when its plugin is missing or stale. CMake also generates `target/aoc-evaluator/compile_commands.json` for `clangd`.
+The CLI automatically configures and incrementally builds `evaluator/roi-counter.c` with CMake when its plugin is missing or stale.
+
+## Agent skill
+
+`SKILL.md` teaches coding agents to operate the CLI. It covers solution records, evaluation commands, failure handling, and data safety. `AGENTS.md` remains the developer guide for changing the project. Pi users can load the operator guide with `pi --skill ./SKILL.md`.
 
 ## Evaluating solutions
 

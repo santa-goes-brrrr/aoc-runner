@@ -6,6 +6,8 @@ ALWAYS KEEP THIS FILE AND README.md UPDATED
 
 Advent of Code solutions optimized for executed RISC-V instruction count. Rust 2024 solutions are cross-compiled as `no_std + alloc` bare-metal RV64GCV programs and evaluated under QEMU system emulation.
 
+This file documents development of the CLI, runtime, evaluator, and solutions. `SKILL.md` is the separate operator guide for agents that only need to use the CLI.
+
 ### Fixed evaluator
 
 - Target: `riscv64gc-unknown-none-elf` with `+v,+zvl256b`
@@ -28,6 +30,7 @@ Vector instructions count once regardless of VL or LMUL. QEMU cycles are not use
 ├── cli/                      # Host database and QEMU evaluator CLI
 ├── evaluator/                # QEMU TCG instruction-counting plugin
 ├── runtime/                  # Shared no_std startup, allocator, ROI, mailbox
+├── SKILL.md                  # Agent guide for operating the CLI
 ├── solutions/year=YYYY/       # One package per year
 │   ├── Cargo.toml
 │   └── src/bin/aoc-YYYY-DD-P.rs
