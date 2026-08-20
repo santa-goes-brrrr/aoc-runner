@@ -3,7 +3,7 @@
 Advent of Code solutions optimized for the fewest executed RISC-V instructions.
 
 <p align="center">
-  <img src="santa-goes-brrrr.png" alt="Santa Goes Brrrr" width="50%">
+  <img src="santa-goes-brriscv.png" alt="Santa Goes Brrrr" width="50%">
 </p>
 
 Solutions run without an operating system under QEMU on a fixed vector-capable target:
