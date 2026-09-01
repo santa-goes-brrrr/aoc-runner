@@ -1059,6 +1059,55 @@ fn probe_tool(
     }
 }
 
+#[derive(Clone, Copy)]
+enum LinuxPackageManager {
+    Pacman,
+    Apt,
+    Dnf,
+    Apk,
+    Other,
+}
+
+fn command_on_path(command: &str) -> bool {
+    std::env::var_os("PATH").is_some_and(|path| {
+        std::env::split_paths(&path).any(|directory| directory.join(command).is_file())
+    })
+}
+
+fn linux_package_manager() -> LinuxPackageManager {
+    if command_on_path("pacman") || Path::new("/etc/arch-release").is_file() {
+        LinuxPackageManager::Pacman
+    } else if command_on_path("apt") || command_on_path("apt-get") {
+        LinuxPackageManager::Apt
+    } else if command_on_path("dnf") {
+        LinuxPackageManager::Dnf
+    } else if command_on_path("apk") {
+        LinuxPackageManager::Apk
+    } else {
+        LinuxPackageManager::Other
+    }
+}
+
+fn linux_setup_message(package_manager: LinuxPackageManager) -> &'static str {
+    match package_manager {
+        LinuxPackageManager::Pacman => {
+            "\nArch Linux / pacman setup:\n  sudo pacman -S --needed rustup qemu-system-riscv cmake gcc pkgconf glib2 binutils\n  rustup default stable\n"
+        }
+        LinuxPackageManager::Apt => {
+            "\nDebian / Ubuntu APT setup:\n  sudo apt update\n  sudo apt install qemu-system-misc qemu-system-common cmake build-essential pkg-config libglib2.0-dev binutils\n"
+        }
+        LinuxPackageManager::Dnf => {
+            "\nFedora / RHEL-family DNF setup:\n  sudo dnf install qemu-system-riscv-core qemu-common cmake gcc pkgconf-pkg-config glib2-devel binutils\n"
+        }
+        LinuxPackageManager::Apk => {
+            "\nAlpine Linux apk setup:\n  sudo apk add qemu-system-riscv64 qemu-dev cmake build-base pkgconf glib-dev binutils\n"
+        }
+        LinuxPackageManager::Other => {
+            "\nLinux setup: install your distribution's QEMU RISC-V system emulator with plugin headers, CMake, a C compiler, pkg-config, GLib development headers, and binutils.\n"
+        }
+    }
+}
+
 fn preflight_failure_message(issues: &[PreflightIssue]) -> String {
     let mut message = "Host evaluator dependency pre-flight failed:\n".to_string();
     for issue in issues {
@@ -1073,9 +1122,7 @@ fn preflight_failure_message(issues: &[PreflightIssue]) -> String {
             "\nmacOS setup:\n  xcode-select --install\n  brew install qemu cmake pkgconf glib\n",
         );
     } else if cfg!(target_os = "linux") {
-        message.push_str(
-            "\nLinux setup: install your distribution's QEMU RISC-V system emulator with plugin headers, CMake, a C compiler, pkg-config, GLib development headers, and binutils.\n",
-        );
+        message.push_str(linux_setup_message(linux_package_manager()));
     }
     message.push_str(&format!(
         "  rustup target add {TARGET}\n\nSee README.md#requirements for details."
@@ -1373,7 +1420,10 @@ fn answer_matches(expected_hash: &str, year: u16, day: u8, part: u8, actual: &st
 
 #[cfg(test)]
 mod tests {
-    use super::{PreflightIssue, answer_hash, preflight_failure_message};
+    use super::{
+        LinuxPackageManager, PreflightIssue, answer_hash, linux_setup_message,
+        preflight_failure_message,
+    };
 
     #[test]
     fn answer_hash_is_canonical_and_domain_separated() {
@@ -1386,6 +1436,36 @@ mod tests {
             answer_hash(2025, 1, 1, "42")
         );
         assert_ne!(answer_hash(2025, 1, 1, "42"), answer_hash(2025, 1, 2, "42"));
+    }
+
+    #[test]
+    fn linux_package_manager_setups_are_actionable() {
+        for (package_manager, command, qemu_package) in [
+            (
+                LinuxPackageManager::Pacman,
+                "sudo pacman -S --needed",
+                "qemu-system-riscv",
+            ),
+            (
+                LinuxPackageManager::Apt,
+                "sudo apt install",
+                "qemu-system-misc",
+            ),
+            (
+                LinuxPackageManager::Dnf,
+                "sudo dnf install",
+                "qemu-system-riscv-core",
+            ),
+            (
+                LinuxPackageManager::Apk,
+                "sudo apk add",
+                "qemu-system-riscv64",
+            ),
+        ] {
+            let message = linux_setup_message(package_manager);
+            assert!(message.contains(command));
+            assert!(message.contains(qemu_package));
+        }
     }
 
     #[test]

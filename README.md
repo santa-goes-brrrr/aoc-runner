@@ -32,6 +32,38 @@ brew install qemu cmake pkgconf glib
 rustup target add riscv64gc-unknown-none-elf
 ```
 
+On Arch Linux and pacman-based derivatives, install the host dependencies with:
+
+```bash
+sudo pacman -S --needed rustup qemu-system-riscv cmake gcc pkgconf glib2 binutils
+rustup default stable
+rustup target add riscv64gc-unknown-none-elf
+```
+
+The Arch `qemu-system-riscv` package pulls in `qemu-common`, which provides
+`qemu-plugin.h`.
+
+Other supported Linux package managers:
+
+```bash
+# Debian / Ubuntu (APT)
+sudo apt update
+sudo apt install qemu-system-misc qemu-system-common cmake build-essential pkg-config libglib2.0-dev binutils
+
+# Fedora / RHEL family (DNF)
+sudo dnf install qemu-system-riscv-core qemu-common cmake gcc pkgconf-pkg-config glib2-devel binutils
+
+# Alpine Linux (apk)
+sudo apk add qemu-system-riscv64 qemu-dev cmake build-base pkgconf glib-dev binutils
+
+# After installing host packages
+rustup target add riscv64gc-unknown-none-elf
+```
+
+The CLI detects pacman, APT, DNF, and apk and includes the matching commands in
+dependency pre-flight failures. Package availability can vary on older distribution
+releases.
+
 Before any `evaluate` command compiles a solution, the CLI checks Cargo, Rust and the RISC-V target, `qemu-system-riscv64` with plugin support, CMake, a C compiler, `pkg-config`, GLib, `nm`, `qemu-plugin.h`, and a complete plugin build. A failed check lists each missing dependency, an individual fix, platform setup commands, and this requirements section. The successful pre-flight configures and incrementally builds `evaluator/roi-counter.c` with CMake. Its CMake configuration allows QEMU to resolve the plugin API at load time on macOS, as required by Darwin's linker.
 
 ## Agent skill
