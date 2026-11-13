@@ -1,14 +1,14 @@
 ---
 name: santa-goes-brrrr
 description: Operate the santa-goes-brrrr CLI to create, inspect, update, and delete Advent of Code solution records, and to evaluate one or all solutions by executed RV64GCV instruction count. Use when asked to run the evaluator or manage its puzzle inputs and expected-answer hashes. Do not use this skill to develop or modify the CLI itself.
-compatibility: Run from the santa-goes-brrrr repository root on Linux or macOS with Rust, QEMU, CMake, pkg-config, GLib headers, qemu-plugin.h, and nm installed.
+compatibility: Run from inside the santa-goes-brrrr repository on Linux or macOS with Rust, QEMU, CMake, pkg-config, GLib headers, qemu-plugin.h, and nm installed.
 ---
 
 # Use the santa-goes-brrrr CLI
 
 Use the CLI as the interface to the database and evaluator. Do not edit `aoc.db` directly, invoke QEMU yourself, or call the evaluator plugin manually.
 
-Run every command from the repository root. Use long option names in commands.
+Run every command from inside the repository; the CLI finds the root itself and refuses to run elsewhere. `--input` paths are relative to the directory you run from. Use long option names in commands.
 
 ## Check the CLI
 
@@ -36,7 +36,7 @@ cargo run --package cli --release -- solution init
 
 ### Create a record
 
-Creation requires an input file and the expected numeric answer:
+Creation requires an input file and the expected answer, a number or, for puzzles whose answer is text, that text:
 
 ```bash
 cargo run --package cli --release -- solution create \
@@ -119,7 +119,9 @@ Limit parallel QEMU workers when host memory is constrained. Each worker reserve
 cargo run --package cli --release -- evaluate all --jobs 4
 ```
 
-The CLI first checks all host evaluator dependencies and reports installation guidance for anything missing. It then builds the required RISC-V binaries and QEMU plugin automatically. Do not run separate Cargo, CMake, or QEMU commands first.
+The CLI first checks all host evaluator dependencies and reports installation guidance for anything missing. It then builds the required RISC-V binaries and QEMU plugin automatically. Do not run separate Cargo, CMake, or QEMU commands first: only the CLI's own builds give comparable scores.
+
+`evaluate all` lists solution sources that have no database record as `Not evaluated, no database record: ...`. Report them; they are not part of the result.
 
 ## Interpret results
 
@@ -134,7 +136,22 @@ Run completed in 3492314268 instructions
 
 Treat a nonzero process exit as a failed evaluation. Report build errors, wrong answers, timeouts, and instruction-budget failures separately. Do not describe a partial bulk run as successful.
 
-The solver budget is 2,000,000,000 instructions. `Timeout` is the 10-second host watchdog failure. Interactive progress updates appear in place; redirected output remains line-oriented.
+The solver budget is 2,000,000,000 instructions. Interactive progress updates appear in place; redirected output remains line-oriented.
+
+Other failures name their cause:
+
+| Message starts with | Meaning |
+|---|---|
+| `Instruction budget exceeded` | The solver ran past the budget. |
+| `Timeout` | The guest executed nothing for 10 seconds. This is a stall, never a slow host. |
+| `Guest trapped` | A CPU exception, with its cause and program counter. An illegal instruction usually means an instruction outside RV64GCV. |
+| `Guest stack overflow` | The 1 MiB stack ran into its guard. |
+| `Guest panicked` | A Rust panic in the solver. |
+| `ROI markers executed out of order or more than once` | The solution executed `__aoc_roi_start` or `__aoc_roi_end` itself. |
+| `Startup instruction limit exceeded` | Code ran before the measured region. |
+| `No solution source at` | The database record has no source file. |
+| `Build error` | The solution did not compile. |
+| `QEMU error` | QEMU itself failed; the message is QEMU's. |
 
 ## Protect local data
 

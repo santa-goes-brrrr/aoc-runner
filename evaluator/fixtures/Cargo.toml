@@ -1,0 +1,9 @@
+[package]
+name = "aoc-fixtures"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Guest programs with known behaviour, used by the evaluator's end-to-end tests"
+
+[dependencies]
+aoc-runtime = { workspace = true }

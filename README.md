@@ -13,12 +13,12 @@ Solutions run without an operating system under QEMU on a fixed vector-capable t
 - Maximum element width: **ELEN=64**
 - Guest RAM: 256 MiB
 - Per-solution instruction budget: 2,000,000,000
-- Host watchdog timeout: 10 seconds
+- Host watchdog: 10 seconds without guest progress
 - Score: architectural instructions retired inside the solver region
 
 ## Requirements
 
-- Rust stable (1.97.1 used by the current evaluator) with `riscv64gc-unknown-none-elf`, configured by `rust-toolchain.toml`
+- Rust 1.99.0 with `riscv64gc-unknown-none-elf`, pinned by `rust-toolchain.toml` and installed by rustup on first use
 - QEMU system emulator with RISC-V and plugin support (developed against QEMU 11.1)
 - `qemu-plugin.h`, CMake, a C compiler, `pkg-config`, and GLib development headers
 - `nm` from binutils or Xcode Command Line Tools
@@ -83,7 +83,9 @@ cargo run --package cli --release -- evaluate all
 cargo run --package cli --release -- evaluate all --jobs 4
 ```
 
-`evaluate all` compiles all requested binaries in one Cargo invocation, allowing Cargo to schedule compilation in parallel, and then runs independent QEMU processes concurrently. QEMU defaults to one worker per available host thread; use `--jobs N` to cap it, with each active worker reserving 256 MiB of guest RAM. Cargo uses `--keep-going`, so successfully built solutions are still evaluated when another binary fails to compile, although the overall command reports an error. Compilation messages remain append-only. On an interactive terminal, each active solution gets a logarithmic progress bar on its first non-zero update; it updates in place at 100,000, 200,000, 400,000, and subsequent doubling thresholds, and its final result replaces the bar message instead of adding another line. Progress bars are hidden and results remain line-oriented when output is redirected.
+The CLI works from any directory inside the repository.
+
+`evaluate all` compiles all requested binaries in one Cargo invocation, allowing Cargo to schedule compilation in parallel, and then runs independent QEMU processes concurrently. A database record without a source file fails on its own, and source files without a database record are listed as not evaluated. QEMU defaults to one worker per available host thread; use `--jobs N` to cap it, with each active worker reserving 256 MiB of guest RAM. Cargo uses `--keep-going`, so successfully built solutions are still evaluated when another binary fails to compile, although the overall command reports an error. Compilation messages remain append-only. On an interactive terminal, each active solution gets a logarithmic progress bar on its first non-zero update; one bar step is a doubling of the instruction count, starting at 100,000, and its final result replaces the bar message instead of adding another line. Progress bars are hidden and results remain line-oriented when output is redirected.
 
 ## How evaluation works
 
@@ -91,11 +93,13 @@ cargo run --package cli --release -- evaluate all --jobs 4
 2. It creates 256 MiB of file-backed guest RAM.
 3. QEMU loads a versioned input packet at guest address `0x8c000000`.
 4. The bare-metal runtime validates the packet and passes a zero-copy `&str` to the solver.
-5. A QEMU TCG plugin counts instructions between trusted ROI symbols, publishes logarithmic progress, and flags the run if it exceeds 2 billion instructions.
-6. The runtime writes a materialized integer answer to a mailbox at `0x8d000000` and exits through QEMU's test-finisher device.
+5. A QEMU TCG plugin counts instructions between the ROI symbols, publishes progress, and fails the run if it exceeds 2 billion instructions, executes a marker twice, or does more before the region than the runtime needs to start.
+6. The runtime writes the answer to a mailbox at `0x8d000000` and exits through QEMU's test-finisher device. A trap, panic, or stack overflow is recorded and reported instead.
 7. The host reads the mailbox, hashes the returned answer, and compares it with the hash in `aoc.db`.
 
-Parsing, allocation, solver logic, and called library code are measured. Boot, input validation, mailbox writes, and shutdown are excluded. The instruction budget is the deterministic solver limit; the 10-second wall-clock watchdog remains as a fallback for stalls before the ROI, QEMU failures, or plugin failures.
+Parsing, allocation, solver logic, and called library code are measured. Boot, input validation, mailbox writes, and shutdown are excluded. Every limit that decides a result is an instruction count, so results do not depend on host speed. The wall-clock watchdog fires only when the guest executes nothing for 10 seconds.
+
+The emulated CPU is QEMU's bare `rv64i` model with exactly the RV64GCV extensions enabled, so instructions outside the compile target trap. To keep scores comparable between machines, the toolchain is pinned and the CLI builds guests with host-specific source paths remapped to fixed names. See `AGENTS.md` for why that matters.
 
 ## Writing a solution
 
@@ -125,17 +129,19 @@ fn solve(input: &str) -> u64 {
 
 Dependencies are declared once in the year's `Cargo.toml`. Build or run a native solution directly with `cargo run --package aoc-2025 --bin aoc-2025-01-1`.
 
-Supported answer types are the Rust signed and unsigned integer primitives through `aoc_runtime::IntoAnswer`. Conversion into the common 128-bit mailbox representation occurs before the ROI ends.
+Supported answer types, through `aoc_runtime::IntoAnswer`, are the Rust signed and unsigned integer primitives and, for puzzles whose answer is text, `&'static str` and `String`. The answer must exist before `solve` returns; conversion into the mailbox representation occurs before the ROI ends.
+
+`solution!` takes the name of a function. All work must happen inside it: the evaluator fails a run that executes an ROI marker itself or does work before the measured region.
 
 Any pure-Rust crate that compiles with `no_std + alloc` is permitted. Native libraries, FFI dependencies, OS APIs, subprocesses, filesystem access, and networking are not available in the guest. Handwritten RVV assembly is permitted.
 
 ## Build and test
 
 ```bash
-# Native unit tests
+# All tests, including end-to-end tests of the evaluator under QEMU
 cargo test --workspace --release
 
-# Cross-compile every bare-metal solution
+# Compile-check every bare-metal program (scores come only from the CLI's own builds)
 cargo build --workspace --exclude cli --release \
   --target riscv64gc-unknown-none-elf
 
