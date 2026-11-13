@@ -10,10 +10,11 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(GLIB REQUIRED IMPORTED_TARGET glib-2.0)
 find_path(QEMU_PLUGIN_INCLUDE_DIR qemu-plugin.h REQUIRED)
+find_package(Threads REQUIRED)
 
 add_library(roi-counter MODULE roi-counter.c)
 target_include_directories(roi-counter PRIVATE "${QEMU_PLUGIN_INCLUDE_DIR}")
-target_link_libraries(roi-counter PRIVATE PkgConfig::GLIB)
+target_link_libraries(roi-counter PRIVATE PkgConfig::GLIB Threads::Threads)
 target_compile_options(roi-counter PRIVATE -Wall -Wextra -Werror)
 
 # QEMU resolves the plugin API when it loads the module. ELF linkers permit
